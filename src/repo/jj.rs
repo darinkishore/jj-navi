@@ -262,6 +262,166 @@ impl<'a> JjClient<'a> {
         Ok(PathBuf::from(root))
     }
 
+    /// Snapshot this client's working copy, making it current.
+    pub(crate) fn snapshot(&self) -> Result<()> {
+        self.run(&[OsString::from("util"), OsString::from("snapshot")])
+            .map(|_| ())
+    }
+
+    /// Recover a stale working copy via `jj workspace update-stale`.
+    pub(crate) fn workspace_update_stale(&self) -> Result<()> {
+        self.run(&[
+            OsString::from("workspace"),
+            OsString::from("update-stale"),
+        ])
+        .map(|_| ())
+    }
+
+    /// Snapshot, recovering a stale working copy once if needed.
+    pub(crate) fn snapshot_recovering_stale(&self) -> Result<bool> {
+        match self.snapshot() {
+            Ok(()) => Ok(false),
+            Err(Error::JjCommandFailed { stderr, .. })
+                if stderr.to_lowercase().contains("stale") =>
+            {
+                self.workspace_update_stale()?;
+                self.snapshot()?;
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Check whether `ancestor` is an ancestor of (or equal to) `descendant`.
+    pub(crate) fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+        let revset = format!("({ancestor}) & ::({descendant})");
+        Ok(!self.revisions(&revset)?.is_empty())
+    }
+
+    /// Count revisions matching a revset.
+    pub(crate) fn count(&self, revset: &str) -> Result<usize> {
+        Ok(self.revisions(revset)?.len())
+    }
+
+    /// Check whether a revision has an empty tree diff against its parents.
+    pub(crate) fn is_empty_commit(&self, revision: &str) -> Result<bool> {
+        let revset = format!("({revision}) & empty()");
+        Ok(!self.revisions(&revset)?.is_empty())
+    }
+
+    /// Describe a revision with a message.
+    pub(crate) fn describe(&self, revision: &str, message: &str) -> Result<()> {
+        self.run(&[
+            OsString::from("describe"),
+            OsString::from("-r"),
+            OsString::from(revision),
+            OsString::from("-m"),
+            OsString::from(message),
+        ])
+        .map(|_| ())
+    }
+
+    /// List changed repo-relative paths between two revisions.
+    pub(crate) fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
+        let output = self.run_ignoring_working_copy(&[
+            OsString::from("diff"),
+            OsString::from("--summary"),
+            OsString::from("--from"),
+            OsString::from(from),
+            OsString::from("--to"),
+            OsString::from(to),
+        ])?;
+
+        Ok(parse_diff_summary_paths(&output))
+    }
+
+    /// List paths changed by a revision against its parents.
+    pub(crate) fn changed_paths_in(&self, revision: &str) -> Result<Vec<String>> {
+        let output = self.run_ignoring_working_copy(&[
+            OsString::from("diff"),
+            OsString::from("--summary"),
+            OsString::from("-r"),
+            OsString::from(revision),
+        ])?;
+
+        Ok(parse_diff_summary_paths(&output))
+    }
+
+    /// Render a git-format diff between two revisions.
+    pub(crate) fn diff_git(&self, from: &str, to: &str) -> Result<String> {
+        self.run_ignoring_working_copy(&[
+            OsString::from("diff"),
+            OsString::from("--git"),
+            OsString::from("--from"),
+            OsString::from(from),
+            OsString::from("--to"),
+            OsString::from(to),
+        ])
+    }
+
+    /// Rebase the branch containing `branch` onto `destination`.
+    pub(crate) fn rebase_branch_onto(&self, branch: &str, destination: &str) -> Result<()> {
+        self.run(&[
+            OsString::from("rebase"),
+            OsString::from("-b"),
+            OsString::from(branch),
+            OsString::from("-d"),
+            OsString::from(destination),
+        ])
+        .map(|_| ())
+    }
+
+    /// Rebase the subtree rooted at `source` onto `destination`.
+    pub(crate) fn rebase_source(&self, source: &str, destination: &str) -> Result<()> {
+        self.run(&[
+            OsString::from("rebase"),
+            OsString::from("-s"),
+            OsString::from(source),
+            OsString::from("-d"),
+            OsString::from(destination),
+        ])
+        .map(|_| ())
+    }
+
+    /// Restore paths in this client's working copy from a revision.
+    pub(crate) fn restore_paths(&self, from: &str, paths: &[String]) -> Result<()> {
+        let mut args = vec![
+            OsString::from("restore"),
+            OsString::from("--from"),
+            OsString::from(from),
+        ];
+        for path in paths {
+            args.push(OsString::from(path));
+        }
+        self.run(&args).map(|_| ())
+    }
+
+    /// Configure sparse patterns for this client's workspace.
+    pub(crate) fn sparse_set(&self, paths: &[String]) -> Result<()> {
+        let mut args = vec![OsString::from("sparse"), OsString::from("set")];
+        for path in paths {
+            args.push(OsString::from("--add"));
+            args.push(OsString::from(path));
+        }
+        self.run(&args).map(|_| ())
+    }
+
+    /// Create a workspace with explicit sparse-pattern handling.
+    pub(crate) fn workspace_add_sparse(
+        &self,
+        workspace: &WorkspaceName,
+        target_root: &Path,
+        revision: Option<&str>,
+        sparse_patterns: &str,
+    ) -> Result<()> {
+        let mut args = workspace_add_args(workspace, target_root, revision);
+        let destination = args.pop().unwrap_or_default();
+        args.push(OsString::from("--sparse-patterns"));
+        args.push(OsString::from(sparse_patterns));
+        args.push(destination);
+        self.run(&args).map(|_| ())
+    }
+
     fn run(&self, args: &[OsString]) -> Result<String> {
         let output = self.run_capture(args)?;
         Ok(output.stdout)
@@ -422,6 +582,29 @@ fn meaningful_stderr(stderr: &str, fallback: &str) -> String {
     } else {
         stderr.trim().to_owned()
     }
+}
+
+fn parse_diff_summary_paths(output: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in output.lines() {
+        let Some((_, path)) = line.split_once(' ') else {
+            continue;
+        };
+        // Rename summaries render as "R {old => new}"-style path groups;
+        // expand them so both sides count as touched paths.
+        if let Some((prefix, rest)) = path.split_once('{')
+            && let Some((group, suffix)) = rest.split_once('}')
+            && let Some((old, new)) = group.split_once(" => ")
+        {
+            paths.push(format!("{prefix}{old}{suffix}"));
+            paths.push(format!("{prefix}{new}{suffix}"));
+            continue;
+        }
+        paths.push(path.to_owned());
+    }
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn parse_diff_stat(output: &str) -> WorkspaceDiffSnapshot {

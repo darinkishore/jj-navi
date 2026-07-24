@@ -18,6 +18,7 @@
 | Output changes | `src/output/`, `src/diagnostics/render.rs`, `src/shell/` | Keep rendering separate from repo logic |
 | Domain rules | `src/types.rs`, `src/error.rs`, `src/diagnostics/` | Validate at boundaries, keep types explicit |
 | Real repo behavior tests | `tests/repo_integration_tests.rs`, `tests/common/` | Prefer these over mocks |
+| Lane workflow (write-sets, land, ripple, gc) | `src/repo/lane_ops.rs`, `src/repo/lane_store.rs`, `tests/lane_tests.rs` | `jj` owns live state; the registry stores only declarations and lifecycle. Landing must stay a fast-forward: all refusals before any mutation |
 
 ## JJ Rules
 

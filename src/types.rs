@@ -172,6 +172,245 @@ impl ShellKind {
 pub struct RepoConfig {
     /// Template used when planning new workspace paths.
     pub workspace_template: WorkspaceTemplate,
+    /// Lane workflow configuration.
+    pub lane: LaneConfig,
+}
+
+/// Validated repo-relative lane write-set path prefix.
+///
+/// Normalized: forward slashes, no leading `./`, no trailing `/`, never
+/// absolute, and never escaping the repo root.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct LanePath(String);
+
+impl LanePath {
+    /// Create a validated lane path prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path is empty, absolute, escapes the repo
+    /// root, or uses backslashes.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let raw = value.into();
+        let trimmed = raw.trim().trim_start_matches("./").trim_end_matches('/');
+
+        if trimmed.is_empty()
+            || trimmed.starts_with('/')
+            || trimmed.contains('\\')
+            || trimmed == "."
+            || trimmed == ".."
+            || trimmed.starts_with("../")
+            || trimmed.contains("/../")
+            || trimmed.ends_with("/..")
+        {
+            return Err(Error::InvalidLanePath(raw));
+        }
+
+        Ok(Self(trimmed.to_owned()))
+    }
+
+    #[must_use]
+    /// Borrow the normalized path prefix as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    /// Check whether a repo-relative file path falls under this prefix.
+    pub fn contains(&self, path: &str) -> bool {
+        let path = path.trim_start_matches("./");
+        path == self.0 || path.strip_prefix(self.0.as_str()).is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    #[must_use]
+    /// Check whether two prefixes claim any common paths.
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.contains(other.as_str()) || other.contains(self.as_str())
+    }
+}
+
+impl fmt::Display for LanePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Durable lifecycle state of a lane. Live facts (sync, conflicts, scope
+/// drift) are always derived from `jj`; only lifecycle transitions persist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LaneLifecycle {
+    /// The lane is active and may land work.
+    Open,
+    /// The lane landed its work and was retired.
+    Closed,
+    /// The lane was archived and discarded without landing.
+    Abandoned,
+}
+
+impl LaneLifecycle {
+    #[must_use]
+    /// Stable string form used in the registry and JSON output.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::Abandoned => "abandoned",
+        }
+    }
+
+    #[must_use]
+    /// Parse the stable string form.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "open" => Some(Self::Open),
+            "closed" => Some(Self::Closed),
+            "abandoned" => Some(Self::Abandoned),
+            _ => None,
+        }
+    }
+}
+
+/// A revision reference reported by lane operations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneRev {
+    /// Commit id (short form).
+    pub commit_id: String,
+    /// Change id (short form).
+    pub change_id: String,
+    /// First line of the description.
+    pub message: String,
+}
+
+/// Outcome of `lane open`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneOpenOutcome {
+    /// Lane name.
+    pub name: WorkspaceName,
+    /// Created workspace directory.
+    pub path: PathBuf,
+    /// Trunk head the lane was based on.
+    pub base: LaneRev,
+    /// Declared write-set.
+    pub paths: Vec<LanePath>,
+    /// Whether the workspace was created sparse.
+    pub sparse: bool,
+}
+
+/// One lane row in `lane list`, with live state derived from `jj`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneListEntry {
+    /// Lane name.
+    pub name: WorkspaceName,
+    /// Durable lifecycle state.
+    pub lifecycle: LaneLifecycle,
+    /// Declared write-set.
+    pub paths: Vec<LanePath>,
+    /// Whether the lane's jj workspace still exists.
+    pub workspace_exists: bool,
+    /// Whether the lane is rebased onto the current trunk head.
+    pub synced: bool,
+    /// Non-empty changes the lane carries beyond trunk.
+    pub ahead: usize,
+    /// Trunk changes the lane has not absorbed.
+    pub behind: usize,
+    /// Conflicted commits in the lane chain.
+    pub conflicts: usize,
+    /// Changed paths outside the declared write-set.
+    pub unscoped: Vec<String>,
+    /// Commit id of the lane's most recent landing, if any.
+    pub last_land: Option<String>,
+}
+
+/// Outcome of syncing one lane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneSyncOutcome {
+    /// Lane name.
+    pub name: WorkspaceName,
+    /// Whether the lane's jj workspace still exists.
+    pub workspace_exists: bool,
+    /// Whether a stale working copy had to be recovered first.
+    pub recovered_stale: bool,
+    /// Whether the lane was rebased onto the trunk head.
+    pub rebased: bool,
+    /// Conflicted commits after the rebase, if any.
+    pub conflicts: Vec<LaneRev>,
+    /// Out-of-scope paths dropped by `--drop-unscoped`.
+    pub dropped: Vec<String>,
+}
+
+/// Fan-out result for one peer lane after a landing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneFanoutEntry {
+    /// Peer lane name.
+    pub name: WorkspaceName,
+    /// Whether the peer was rebased onto the new head.
+    pub rebased: bool,
+    /// Conflicted commits the rebase produced in the peer lane.
+    pub conflicts: usize,
+    /// Error message if the peer could not be rebased.
+    pub error: Option<String>,
+}
+
+/// Outcome of `lane land`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneLandOutcome {
+    /// Lane name.
+    pub name: WorkspaceName,
+    /// The landed head revision, now the trunk head.
+    pub landed: LaneRev,
+    /// Number of non-empty changes fast-forwarded onto trunk.
+    pub landed_changes: usize,
+    /// Gate command that passed, if one ran.
+    pub gate: Option<String>,
+    /// Per-peer fan-out results.
+    pub fanout: Vec<LaneFanoutEntry>,
+    /// Whether the lane was closed after landing.
+    pub closed: bool,
+}
+
+/// Outcome of `lane abandon`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneAbandonOutcome {
+    /// Lane name.
+    pub name: WorkspaceName,
+    /// Where the lane's diff was archived, if it had one.
+    pub archive: Option<PathBuf>,
+    /// Workspace directory that was deleted, if it existed.
+    pub removed_directory: Option<PathBuf>,
+}
+
+/// Garbage-collection plan for ghost workspaces and orphaned lanes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LaneGcPlan {
+    /// Workspaces registered in `jj` whose directories are gone.
+    pub ghost_workspaces: Vec<WorkspaceName>,
+    /// Open registry lanes with no corresponding `jj` workspace.
+    pub orphaned_lanes: Vec<WorkspaceName>,
+}
+
+/// Lane workflow configuration stored in the repo config file.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaneConfig {
+    /// Workspace whose working-copy parent is the trunk head.
+    pub trunk: WorkspaceName,
+    /// Gate command run before every landing (via `sh -c`), if configured.
+    pub gate: Option<String>,
+    /// Create lane workspaces sparse, materializing only the write-set and
+    /// context paths.
+    pub sparse: bool,
+    /// Extra read-only paths materialized into sparse lane workspaces.
+    pub context_paths: Vec<LanePath>,
+}
+
+impl Default for LaneConfig {
+    fn default() -> Self {
+        Self {
+            trunk: WorkspaceName(String::from("default")),
+            gate: None,
+            sparse: false,
+            context_paths: Vec::new(),
+        }
+    }
 }
 
 /// Shared path source used by workspace health snapshots.

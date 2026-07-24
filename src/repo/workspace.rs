@@ -90,6 +90,16 @@ impl NaviWorkspace {
     }
 
     #[must_use]
+    pub(crate) fn repo_storage_path(&self) -> &Path {
+        &self.repo_storage_path
+    }
+
+    #[must_use]
+    pub(crate) fn repo_config(&self) -> &RepoConfig {
+        &self.config
+    }
+
+    #[must_use]
     pub(crate) fn current_workspace_name(&self) -> &WorkspaceName {
         &self.current_workspace
     }

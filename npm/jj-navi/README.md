@@ -128,7 +128,59 @@ navi remove <workspace> -y
 navi config shell init <bash|zsh>
 navi config shell install [--shell <bash|zsh>]
 navi config shell install [-s <bash|zsh>]
+
+navi lane open <name> --path <prefix> [...]  # declare a write-set, open a lane on the trunk head
+navi lane claim <name> --path <prefix>       # extend an open lane's write-set
+navi lane list [--json]                      # lane weather: ☀ synced · ⛅ behind · ⛈ conflicted · 🌫 scope drift
+navi lane sync [<name>] [--drop-unscoped]    # rebase lanes onto the trunk head
+navi lane land <name> [-m <msg>] [--close]   # gate, fast-forward trunk, ripple the new head to peers
+navi lane close <name>                       # retire a fully landed lane
+navi lane abandon <name> [--yes]             # archive the diff, then discard the lane
+navi lane gc [--apply] [--yes]               # collect ghost workspaces and orphaned lanes
 ```
+
+## Lanes: concurrent work without merge-day
+
+Lanes are for repos where several agents (or humans) work the same trunk
+concurrently. Each lane is a jj workspace plus a **declared write-set** —
+the path prefixes it intends to touch — registered in repo storage.
+Everything else follows from two rules:
+
+1. **Divergence age is the enemy, not landing size.** Every landing rebases
+   every other open lane onto the new head (the *ripple*), so conflicts
+   surface in the owning lane within minutes as small, attributed diffs —
+   never at integration time as a 40-file surprise. A lane can cook for a
+   week and still land clean, because it ate its conflicts incrementally.
+2. **Landing is a fast-forward, not a merge.** `lane land` requires the lane
+   to be synced onto the trunk head, checks the diff stays inside the
+   write-set, refuses if trunk's working copy is dirty *inside that
+   write-set* (unrelated trunk dirt does not block), runs the configured
+   gate command, then advances trunk onto the lane's chain. No merge
+   commits; a landing that would conflict is structurally impossible.
+
+Write-set overlap between open lanes is refused at `lane open` — the moment
+coordination is cheapest — unless you opt in with `--allow-overlap`.
+Out-of-scope changes show up as 🌫 in `lane list`, block landing with the
+offending paths named, and can be mechanically dropped with
+`lane sync --drop-unscoped`.
+
+Repo-level configuration lives next to navi's other state (shared jj repo
+storage, `navi/config.toml`):
+
+```toml
+workspace_template = "../{repo}.{workspace}"
+
+[lane]
+trunk = "default"          # workspace whose @-parent is the trunk head
+gate = "cargo test"        # run in the lane before every landing (sh -c)
+sparse = false             # open lanes as sparse workspaces by default
+context_paths = ["AGENTS.md"]  # extra read-only paths for sparse lanes
+```
+
+Lifecycle is total: a lane ends `closed` (landed and retired) or
+`abandoned` (diff archived under `navi/archive/`, then discarded) — and
+`lane gc` sweeps up ghost workspaces whose directories vanished, so the
+workspace list stays legible.
 
 ## How it works
 

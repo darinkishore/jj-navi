@@ -2,6 +2,8 @@ mod config;
 mod discovery;
 mod doctor;
 mod jj;
+mod lane_ops;
+mod lane_store;
 mod metadata;
 mod paths;
 mod state;

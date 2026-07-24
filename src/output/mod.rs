@@ -1,5 +1,6 @@
 //! Output rendering helpers for CLI-facing text and shell integration.
 
+mod lane_render;
 mod render;
 
 use anstyle::{Ansi256Color, AnsiColor, Color, Effects, RgbColor, Style};
@@ -16,6 +17,10 @@ pub use crate::shell::{
 };
 #[doc(hidden)]
 pub use render::render_workspace_table_with_width;
+pub use lane_render::{
+    render_lane_abandon_outcome, render_lane_gc, render_lane_land_outcome, render_lane_list,
+    render_lane_list_json, render_lane_open_outcome, render_lane_sync_outcomes,
+};
 pub use render::{render_merge_outcome, render_workspace_list_json, render_workspace_table};
 
 const INFERRED_ISSUE_URL: &str = "https://github.com/eersnington/jj-navi/issues/36";

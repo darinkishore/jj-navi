@@ -95,6 +95,107 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    #[command(
+        about = "Concurrent-work lanes: declared write-sets, fast-forward landings, fan-out sync"
+    )]
+    #[command(arg_required_else_help = true)]
+    Lane {
+        #[command(subcommand)]
+        command: LaneCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum LaneCommands {
+    #[command(about = "Open a lane: declare a write-set and create its workspace on the trunk head")]
+    Open {
+        #[arg(help = "Lane name")]
+        name: String,
+
+        #[arg(
+            long = "path",
+            short = 'p',
+            required = true,
+            help = "Repo-relative write-set path prefix (repeatable)"
+        )]
+        paths: Vec<String>,
+
+        #[arg(long, help = "Allow write-set overlap with another open lane")]
+        allow_overlap: bool,
+
+        #[arg(long, help = "Create the workspace sparse (write-set + context paths only)", overrides_with = "full")]
+        sparse: bool,
+
+        #[arg(long, help = "Create the workspace with the full tree", overrides_with = "sparse")]
+        full: bool,
+    },
+    #[command(about = "Extend an open lane's write-set")]
+    Claim {
+        #[arg(help = "Lane name", add = completion::workspace_value_completer())]
+        name: String,
+
+        #[arg(
+            long = "path",
+            short = 'p',
+            required = true,
+            help = "Repo-relative write-set path prefix (repeatable)"
+        )]
+        paths: Vec<String>,
+
+        #[arg(long, help = "Allow write-set overlap with another open lane")]
+        allow_overlap: bool,
+    },
+    #[command(about = "List lanes with live weather: sync, drift, conflicts, scope", visible_alias = "ls")]
+    List {
+        #[arg(long, short = 'j', help = "Render lanes as JSON")]
+        json: bool,
+
+        #[arg(long, short = 'c', help = "Render compact JSON", requires = "json")]
+        compact: bool,
+    },
+    #[command(about = "Rebase lanes onto the current trunk head (all open lanes by default)")]
+    Sync {
+        #[arg(help = "Lane name; omit to sync every open lane", add = completion::workspace_value_completer())]
+        name: Option<String>,
+
+        #[arg(long, help = "Restore out-of-scope paths from the trunk head")]
+        drop_unscoped: bool,
+    },
+    #[command(about = "Land a lane: gate, fast-forward trunk, ripple the new head to peers")]
+    Land {
+        #[arg(help = "Lane name", add = completion::workspace_value_completer())]
+        name: String,
+
+        #[arg(long, short = 'm', help = "Description for the landed head if it has none")]
+        message: Option<String>,
+
+        #[arg(long, help = "Skip the configured gate command")]
+        no_gate: bool,
+
+        #[arg(long, help = "Close and remove the lane after landing")]
+        close: bool,
+    },
+    #[command(about = "Close a fully landed lane and remove its workspace")]
+    Close {
+        #[arg(help = "Lane name", add = completion::workspace_value_completer())]
+        name: String,
+    },
+    #[command(about = "Abandon a lane: archive its diff, then remove workspace and registration")]
+    Abandon {
+        #[arg(help = "Lane name", add = completion::workspace_value_completer())]
+        name: String,
+
+        #[arg(long, short = 'y', help = "Skip destructive confirmation")]
+        yes: bool,
+    },
+    #[command(about = "Collect ghost workspaces (directory gone) and orphaned lane records")]
+    Gc {
+        #[arg(long, help = "Apply the plan instead of printing it")]
+        apply: bool,
+
+        #[arg(long, short = 'y', help = "Skip confirmation when applying")]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -191,6 +292,47 @@ fn try_run(
         Commands::Merge { from, into } => {
             commands::merge::run_merge(&path, &from, into.as_deref())?;
         }
+        Commands::Lane { command } => match command {
+            LaneCommands::Open {
+                name,
+                paths,
+                allow_overlap,
+                sparse,
+                full,
+            } => {
+                let sparse = if sparse {
+                    Some(true)
+                } else if full {
+                    Some(false)
+                } else {
+                    None
+                };
+                commands::lane::run_lane_open(&path, &name, &paths, allow_overlap, sparse)?;
+            }
+            LaneCommands::Claim {
+                name,
+                paths,
+                allow_overlap,
+            } => commands::lane::run_lane_claim(&path, &name, &paths, allow_overlap)?,
+            LaneCommands::List { json, compact } => {
+                commands::lane::run_lane_list(&path, json, compact)?;
+            }
+            LaneCommands::Sync {
+                name,
+                drop_unscoped,
+            } => commands::lane::run_lane_sync(&path, name.as_deref(), drop_unscoped)?,
+            LaneCommands::Land {
+                name,
+                message,
+                no_gate,
+                close,
+            } => commands::lane::run_lane_land(&path, &name, message.as_deref(), no_gate, close)?,
+            LaneCommands::Close { name } => commands::lane::run_lane_close(&path, &name)?,
+            LaneCommands::Abandon { name, yes } => {
+                commands::lane::run_lane_abandon(&path, &name, yes)?;
+            }
+            LaneCommands::Gc { apply, yes } => commands::lane::run_lane_gc(&path, apply, yes)?,
+        },
         Commands::Config { command } => match command {
             ConfigCommands::Shell { command } => match command {
                 ShellCommands::Init { shell } => {

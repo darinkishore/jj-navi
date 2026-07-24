@@ -304,6 +304,146 @@ pub enum Error {
     #[error("error: failed to serialize json output\n{0}")]
     JsonSerialization(String),
 
+    /// A lane write-set path violates validation rules.
+    #[error(
+        "error: invalid lane path '{0}'\nhint: use repo-relative path prefixes like src/module or docs/guide.md"
+    )]
+    InvalidLanePath(String),
+
+    /// The lane registry could not be parsed or validated.
+    #[error("error: invalid lane registry in {path}\n{message}")]
+    InvalidLaneRegistry {
+        /// Registry file path.
+        path: PathBuf,
+        /// Validation or parse message.
+        message: String,
+    },
+
+    /// A lane with this name is already open.
+    #[error("error: lane '{0}' is already open\nhint: run navi lane list")]
+    LaneExists(String),
+
+    /// The named lane is not in the registry.
+    #[error("error: lane '{0}' is not registered\nhint: run navi lane list")]
+    LaneNotFound(String),
+
+    /// The named lane is registered but no longer open.
+    #[error("error: lane '{name}' is {lifecycle}, not open")]
+    LaneNotOpen {
+        /// Lane name.
+        name: String,
+        /// Terminal lifecycle state.
+        lifecycle: &'static str,
+    },
+
+    /// The lane name is reserved for the trunk workspace.
+    #[error("error: '{0}' is the trunk workspace and cannot be a lane")]
+    LaneNameReserved(String),
+
+    /// Two lanes would claim overlapping write-set paths.
+    #[error(
+        "error: lane path '{path}' overlaps open lane '{other}' (its path '{other_path}')\nhint: coordinate with that lane or rerun with --allow-overlap"
+    )]
+    LaneOverlap {
+        /// Requested path.
+        path: String,
+        /// Existing open lane owning the overlap.
+        other: String,
+        /// The overlapping path in the existing lane.
+        other_path: String,
+    },
+
+    /// The configured trunk workspace does not exist.
+    #[error("error: trunk workspace '{0}' does not exist\nhint: check [lane] trunk in navi config")]
+    LaneTrunkMissing(String),
+
+    /// The trunk working copy is not in a landable state.
+    #[error("error: trunk workspace '{trunk}' is not ready: {reason}")]
+    LaneTrunkNotReady {
+        /// Trunk workspace name.
+        trunk: String,
+        /// Why the trunk cannot accept a landing.
+        reason: String,
+    },
+
+    /// Trunk working-copy dirt intersects the lane's write-set.
+    #[error(
+        "error: trunk working copy has uncommitted changes inside lane '{lane}' write-set:\n{paths}\nhint: land or restore those trunk changes first; unrelated trunk dirt does not block landing"
+    )]
+    LaneTrunkDirtyInScope {
+        /// Lane name.
+        lane: String,
+        /// Newline-joined offending paths.
+        paths: String,
+    },
+
+    /// The lane workspace no longer exists in `jj`.
+    #[error(
+        "error: lane '{0}' has no jj workspace\nhint: run navi lane gc to reconcile the registry"
+    )]
+    LaneWorkspaceMissing(String),
+
+    /// The lane is not rebased onto the current trunk head.
+    #[error(
+        "error: lane '{lane}' is not synced onto the trunk head ({behind} trunk change(s) missing)\nhint: run navi lane sync {lane}"
+    )]
+    LaneNotSynced {
+        /// Lane name.
+        lane: String,
+        /// Number of trunk changes the lane has not absorbed.
+        behind: usize,
+    },
+
+    /// The lane chain still contains conflicted commits.
+    #[error(
+        "error: lane '{lane}' has {count} conflicted change(s)\nhint: resolve conflicts in the lane workspace, then retry"
+    )]
+    LaneConflicted {
+        /// Lane name.
+        lane: String,
+        /// Conflicted commit count.
+        count: usize,
+    },
+
+    /// The lane has no work to land.
+    #[error("error: lane '{0}' has no changes to land")]
+    LaneNothingToLand(String),
+
+    /// The landing head has no description and no message was provided.
+    #[error(
+        "error: lane '{0}' head has no description\nhint: rerun with -m to describe the landing"
+    )]
+    LaneNeedsMessage(String),
+
+    /// The lane diff touches paths outside its declared write-set.
+    #[error(
+        "error: lane '{lane}' has changes outside its write-set:\n{paths}\nhint: extend the lane with navi lane claim, or drop them with navi lane sync {lane} --drop-unscoped"
+    )]
+    LaneUnscopedChanges {
+        /// Lane name.
+        lane: String,
+        /// Newline-joined offending paths.
+        paths: String,
+    },
+
+    /// The configured gate command rejected the landing.
+    #[error(
+        "error: gate command failed ({command})\nhint: fix the lane and retry, or land with --no-gate if the gate itself is broken"
+    )]
+    LaneGateFailed {
+        /// Gate command line.
+        command: String,
+    },
+
+    /// Closing a lane requires it to be fully landed.
+    #[error(
+        "error: lane '{lane}' still has unlanded work\nhint: land it first, or use navi lane abandon to archive and discard"
+    )]
+    LaneNotLanded {
+        /// Lane name.
+        lane: String,
+    },
+
     /// An underlying I/O operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

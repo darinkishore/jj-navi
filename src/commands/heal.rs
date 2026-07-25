@@ -31,7 +31,7 @@ pub struct HealOptions<'a> {
 }
 
 #[derive(serde::Serialize)]
-struct HealReport {
+pub(crate) struct HealReport {
     applied: bool,
     healed: Vec<HealedChangeJson>,
     skipped: Vec<SkippedChangeJson>,
@@ -245,20 +245,26 @@ fn select_heals<'a>(
 ///
 /// Returns an error if the repo or engine cannot be opened, or if applying
 /// the plan fails.
-pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
+pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<HealReport> {
     let repo = NaviWorkspace::open(path)?;
+    run_heal_in(&repo, options)
+}
+
+/// Heal against an already-open repo (shared with `tidy`).
+pub(crate) fn run_heal_in(repo: &NaviWorkspace, options: &HealOptions<'_>) -> Result<HealReport> {
     let engine = repo.open_engine()?;
     let all = engine.divergent_changes()?;
 
     if all.is_empty() {
         eprintln!("no divergent changes — nothing to heal");
+        let report = build_heal_report(options.apply, &[], &[], 0, 0, 0, 0);
         if options.json {
-            emit_heal_envelope(options.apply, &[], &[], 0, 0, 0, 0)?;
+            emit_report(&report)?;
         }
-        return Ok(());
+        return Ok(report);
     }
 
-    let on_target = target_ancestry_members(&repo, &engine, &all);
+    let on_target = target_ancestry_members(repo, &engine, &all);
 
     let plan = select_heals(
         &all,
@@ -318,22 +324,28 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
         eprintln!("plan only; rerun with --apply to heal");
     }
 
+    let report = build_heal_report(
+        options.apply,
+        &planned,
+        &skipped,
+        filtered,
+        over_limit,
+        abandoned,
+        rebased_chains,
+    );
     if options.json {
-        emit_heal_envelope(
-            options.apply,
-            &planned,
-            &skipped,
-            filtered,
-            over_limit,
-            abandoned,
-            rebased_chains,
-        )?;
+        emit_report(&report)?;
     }
+    Ok(report)
+}
+
+fn emit_report(report: &HealReport) -> Result<()> {
+    println!("{}", crate::output::render_json_envelope("heal", report)?);
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // flat envelope inputs
-fn emit_heal_envelope(
+#[allow(clippy::too_many_arguments)] // flat report inputs
+fn build_heal_report(
     applied: bool,
     planned: &[PlannedHeal<'_>],
     skipped: &[SkippedHeal<'_>],
@@ -341,8 +353,8 @@ fn emit_heal_envelope(
     over_limit: usize,
     abandoned_commits: usize,
     rebased_chains: usize,
-) -> Result<()> {
-    let report = HealReport {
+) -> HealReport {
+    HealReport {
         applied,
         healed: planned
             .iter()
@@ -370,9 +382,7 @@ fn emit_heal_envelope(
         over_limit,
         abandoned_commits,
         rebased_chains,
-    };
-    println!("{}", crate::output::render_json_envelope("heal", &report)?);
-    Ok(())
+    }
 }
 
 fn render_plan(

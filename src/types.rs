@@ -493,6 +493,8 @@ pub struct LaneConfig {
     pub integration_workspace: WorkspaceName,
     /// Gate command run before every landing (via `sh -c`), if configured.
     pub gate: Option<String>,
+    /// Auto-apply `[resolve]` policies when a lane sync mints conflicts.
+    pub auto_resolve: bool,
     /// Create lane workspaces sparse, materializing only the write-set and
     /// context paths.
     pub sparse: bool,
@@ -507,6 +509,7 @@ impl Default for LaneConfig {
             target: None,
             integration_workspace: WorkspaceName(String::from("navi-integration")),
             gate: None,
+            auto_resolve: true,
             sparse: false,
             context_paths: Vec::new(),
         }

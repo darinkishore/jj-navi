@@ -31,6 +31,7 @@ pub fn run_lane_open(
     let name = WorkspaceName::new(name.to_owned())?;
     let paths = parse_lane_paths(paths)?;
     let outcome = repo.lane_open(&name, paths, allow_overlap, sparse, revision)?;
+    repo.divergence_tripwire();
     eprint!("{}", render_lane_open_outcome(&outcome));
     if json {
         println!("{}", render_json_envelope("lane open", &outcome)?);
@@ -162,7 +163,22 @@ pub fn run_lane_sync(
     let name = name
         .map(|value| WorkspaceName::new(value.to_owned()))
         .transpose()?;
-    let outcomes = repo.lane_sync(name.as_ref(), drop_unscoped)?;
+    let mut outcomes = repo.lane_sync(name.as_ref(), drop_unscoped)?;
+    // Conflicts die at birth: when a sync mints conflicts and [resolve]
+    // policies exist, apply them immediately and re-sync so the weather
+    // report reflects the healed state.
+    let config = repo.repo_config();
+    if config.lane.auto_resolve
+        && !config.resolve.is_empty()
+        && outcomes
+            .iter()
+            .any(|outcome| !outcome.conflicts.is_empty())
+    {
+        eprintln!("sync minted conflicts; applying [resolve] policies...");
+        crate::commands::resolve::sweep_policies(&repo, true)?;
+        outcomes = repo.lane_sync(name.as_ref(), drop_unscoped)?;
+    }
+    repo.divergence_tripwire();
     eprint!("{}", render_lane_sync_outcomes(&outcomes));
     if json {
         #[derive(serde::Serialize)]
@@ -193,6 +209,7 @@ pub fn run_lane_land(
     let repo = NaviWorkspace::open(path)?;
     let name = WorkspaceName::new(name.to_owned())?;
     let outcome = repo.lane_land(&name, request)?;
+    repo.divergence_tripwire();
     eprint!("{}", render_lane_land_outcome(&outcome));
     if json {
         println!("{}", render_json_envelope("lane land", &outcome)?);

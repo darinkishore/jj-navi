@@ -68,6 +68,9 @@ Two landing modes, set in repo config (`navi config show`):
 - Concurrency: every mutating verb holds a repo-wide lock. A concurrent
   landing cannot clobber yours (loser gets `trunk-moved`, nothing applied).
   On `mutation-lock-timeout`, wait and retry (or raise NAVI_LOCK_TIMEOUT_MS).
+- Divergence tripwire: mutating verbs warn the moment the divergent-commit
+  count rises past the recorded baseline. Treat that warning as a signal
+  to run `navi heal` soon and to check that everyone is using `navi exec`.
 
 ## Session start checklist
 
@@ -97,6 +100,9 @@ navi lane land feat-auth -m "auth: add tokens" --close --json
   shrink the write-set (release refuses to empty it).
 - `lane sync [NAME] [--drop-unscoped]` — all open lanes when NAME omitted;
   `--drop-unscoped` restores out-of-scope files from the target head.
+  When a sync mints conflicts on files covered by `[resolve]` policies,
+  navi auto-applies them (disable with `[lane] auto_resolve = false`) —
+  policied conflicts die at birth instead of propagating.
 - `lane land NAME` — refusal-checked (synced? conflict-free? in scope?
   described?), then gate, then atomic advance, then automatic *fan-out*:
   every peer lane is rebased onto the new head (snapshot-first, no
@@ -112,9 +118,14 @@ navi lane land feat-auth -m "auth: add tokens" --close --json
 
 ## Repair toolkit (when the repo is sick)
 
+- `navi tidy [--apply --yes]` — the whole pipeline in one idempotent verb:
+  workspace gc, `[resolve]` policy sweep, guarded heal, in the right
+  order. Run it at session start or whenever doctor looks unhappy.
 - `navi doctor --deep --json` — full census: divergent changes, conflicted
   commits, orphan heads, op churn, merged-then-amended landings, target
-  push-blockers.
+  push-blockers. If it warns the op log is very large, compact it
+  (`jj op abandon ..<old-op-id>` then `jj util gc`) — a bloated op log
+  slows every command.
 - `navi heal [--apply]` — divergence healer: newest-op-wins per change,
   stale siblings abandoned, stacked descendants rebased onto the winner.
   The plan shows each loser's content diff vs the keeper ("identical tree
@@ -131,7 +142,11 @@ navi lane land feat-auth -m "auth: add tokens" --close --json
   dead branches and are cleanup, not emergencies. `-r <revset>` limits
   the census to that revset's ancestry (e.g. `-r main`). Fix roots;
   descendants re-merge automatically.
-- `navi resolve --union <FILE> [--apply]` — structurally union-merge an
+- `navi abandon -r <revset> [--apply]` — bulk-abandon dead subtrees
+  (stranded heads, orphaned experiments). Guarded: refuses working-copy
+  chains and anything in the landing target's ancestry; one op, restored
+  by `jj op undo`.
+- `navi resolve --union <FILE> [-r <revset>] [--apply]` — structurally union-merge an
   append-only file (changelogs) at every root, looping to fixpoint. A line
   survives once if any side has it (deduped across sides — rebase echoes
   duplicate entries); works for any number of conflict sides. Expect the

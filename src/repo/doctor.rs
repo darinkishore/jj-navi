@@ -161,14 +161,22 @@ fn engine_findings(workspace_root: &Path) -> Vec<DoctorFinding> {
             }
             match engine.op_churn(86_400, 5_000) {
                 Ok(churn) => findings.push(deep_finding(
-                    DoctorSeverity::Info,
+                    if churn.capped {
+                        DoctorSeverity::Warning
+                    } else {
+                        DoctorSeverity::Info
+                    },
                     DoctorFindingCode::OpChurn,
                     format!(
                         "{}{} operation(s) in the last 24h",
                         churn.recent,
                         if churn.capped { "+" } else { "" }
                     ),
-                    None,
+                    churn.capped.then(|| {
+                        String::from(
+                            "op log is very large and slows every navi/jj command; compact it: jj op abandon ..<old-op-id> then jj util gc",
+                        )
+                    }),
                 )),
                 Err(error) => findings.push(deep_finding(
                     DoctorSeverity::Warning,

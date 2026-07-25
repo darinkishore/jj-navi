@@ -284,6 +284,31 @@ impl NaviWorkspace {
         result
     }
 
+    /// Divergence tripwire: warn the moment the divergent-change count
+    /// rises above the recorded baseline, then move the baseline. Called
+    /// after mutating commands; entirely best-effort (never fails the
+    /// command it runs after).
+    pub(crate) fn divergence_tripwire(&self) {
+        let jj = JjClient::new(&self.workspace_root);
+        let Ok(count) = jj.count("divergent()") else {
+            return;
+        };
+        let Ok(mut state) = super::state::RepoStateStore::load(&self.repo_storage_path) else {
+            return;
+        };
+        let baseline = state.divergent_baseline().unwrap_or(0);
+        if count > baseline {
+            eprintln!(
+                "warning: divergent commits rose from {baseline} to {count} — concurrent rewrites are colliding
+hint: run navi heal (and route raw jj through navi exec)"
+            );
+        }
+        if count != baseline || state.divergent_baseline().is_none() {
+            state.set_divergent_baseline(count);
+            let _ = state.save();
+        }
+    }
+
     /// Best-effort recovery of a stale working copy at `root`.
     pub(crate) fn recover_stale_at(root: &Path) {
         let _ = JjClient::new(root).workspace_update_stale();

@@ -33,6 +33,8 @@ struct LaneConfigFile {
     #[serde(default)]
     gate: Option<String>,
     #[serde(default)]
+    auto_resolve: Option<bool>,
+    #[serde(default)]
     sparse: Option<bool>,
     #[serde(default)]
     context_paths: Vec<String>,
@@ -76,6 +78,9 @@ pub(crate) fn load_repo_config(repo_storage_path: &Path) -> Result<RepoConfig> {
             .map_err(|error| config_error(error.to_string()))?
             .unwrap_or(lane_defaults.integration_workspace),
         gate: lane_file.gate.filter(|gate| !gate.trim().is_empty()),
+        auto_resolve: lane_file
+            .auto_resolve
+            .unwrap_or(lane_defaults.auto_resolve),
         sparse: lane_file.sparse.unwrap_or(lane_defaults.sparse),
         context_paths: lane_file
             .context_paths
@@ -169,6 +174,9 @@ fn render_config_scaffold(config: &RepoConfig, target: Option<&str>) -> String {
          # # Gate command run (via sh -c, in the lane workspace) before every\n\
          # # landing; landing aborts if it fails.\n\
          # gate = \"cargo test\"\n\
+         # # Auto-apply [resolve] policies when a lane sync mints conflicts\n\
+         # # (default true; conflicts on policied files die at birth).\n\
+         # auto_resolve = true\n\
          # # Create lane workspaces sparse by default (write-set + context\n\
          # # paths only). Override per lane with --sparse/--full.\n\
          # sparse = false\n\

@@ -114,9 +114,15 @@ pub fn run_conflicts(path: &Path, revisions: Option<&str>, json: bool) -> Result
 ///
 /// Returns an error if the repo or engine cannot be opened, or if applying
 /// a resolution fails.
-pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool, json: bool) -> Result<()> {
+pub fn run_resolve_union(
+    path: &Path,
+    target_file: &str,
+    revisions: Option<&str>,
+    apply: bool,
+    json: bool,
+) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
-    let report = resolve_union_file(&repo, target_file, apply)?;
+    let report = resolve_union_scoped(&repo, target_file, revisions, apply)?;
     if json {
         println!(
             "{}",
@@ -134,20 +140,14 @@ pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool, json: bool
 /// Returns an error if no policies are configured or a sweep step fails.
 pub fn run_resolve_policies(path: &Path, apply: bool, json: bool) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
-    let policies = repo.repo_config().resolve.clone();
-    if policies.is_empty() {
+    if repo.repo_config().resolve.is_empty() {
         return Err(Error::Engine {
             message: String::from(
                 "no [resolve] policies configured\nhint: add e.g. \"CHANGELOG.md\" = \"union\" to the [resolve] table in navi config, or pass --union <file>",
             ),
         });
     }
-
-    let mut reports = Vec::new();
-    for policy in &policies {
-        eprintln!("policy: '{}' -> {}", policy.path, policy.strategy.as_str());
-        reports.push(resolve_union_file(&repo, &policy.path, apply)?);
-    }
+    let reports = sweep_policies(&repo, apply)?;
     if json {
         #[derive(serde::Serialize)]
         struct SweepResult {
@@ -165,8 +165,23 @@ pub fn run_resolve_policies(path: &Path, apply: bool, json: bool) -> Result<()> 
     Ok(())
 }
 
+/// Apply every configured `[resolve]` policy; empty vec when none are
+/// configured. Shared by `resolve`, `lane sync` auto-resolve, and `tidy`.
+pub(crate) fn sweep_policies(
+    repo: &NaviWorkspace,
+    apply: bool,
+) -> Result<Vec<FileResolveReport>> {
+    let policies = repo.repo_config().resolve.clone();
+    let mut reports = Vec::new();
+    for policy in &policies {
+        eprintln!("policy: '{}' -> {}", policy.path, policy.strategy.as_str());
+        reports.push(resolve_union_scoped(repo, &policy.path, None, apply)?);
+    }
+    Ok(reports)
+}
+
 #[derive(serde::Serialize)]
-struct FileResolveReport {
+pub(crate) struct FileResolveReport {
     file: String,
     strategy: &'static str,
     applied: bool,
@@ -175,9 +190,11 @@ struct FileResolveReport {
     skipped: Vec<String>,
 }
 
-fn resolve_union_file(
+#[allow(clippy::too_many_lines)] // one linear fixpoint loop
+fn resolve_union_scoped(
     repo: &NaviWorkspace,
     target_file: &str,
+    scope_revset: Option<&str>,
     apply: bool,
 ) -> Result<FileResolveReport> {
     // One root resolves per pass (descendant rebases invalidate the other
@@ -209,7 +226,19 @@ fn resolve_union_file(
             // Re-open the engine each pass: every applied resolution
             // rewrites history and rebases descendants.
             let engine = repo.open_engine()?;
-            let roots = engine.conflict_roots(None)?;
+            // Re-resolve the scope each pass: rebases change commit ids,
+            // the revset keeps meaning the same thing.
+            let scope: Option<Vec<String>> = scope_revset
+                .map(|revset| -> Result<Vec<String>> {
+                    Ok(repo
+                        .main_jj_client()
+                        .revisions(revset)?
+                        .into_iter()
+                        .map(|head| head.commit_id)
+                        .collect())
+                })
+                .transpose()?;
+            let roots = engine.conflict_roots(scope.as_deref())?;
             let targets: Vec<_> = roots
                 .iter()
                 .filter(|root| root.paths.iter().any(|p| p == target_file))

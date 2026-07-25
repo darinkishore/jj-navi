@@ -1,3 +1,4 @@
+pub(crate) mod abandon;
 pub(crate) mod config_shell;
 pub(crate) mod config_show;
 pub(crate) mod doctor;
@@ -11,3 +12,4 @@ pub(crate) mod remove;
 pub(crate) mod resolve;
 pub(crate) mod skill;
 pub(crate) mod switch;
+pub(crate) mod tidy;

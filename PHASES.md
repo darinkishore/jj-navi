@@ -96,6 +96,25 @@ sts_mods runbook (not yet executed), and the backlog.
   reports `::<target>` push-blockers; `trunk = <workspace>` remains the
   legacy fallback.
 
+## Prevention & repair layer (shipped 2026-07-25, post-phase-4)
+
+- `[lane] auto_resolve` (default on): lane sync auto-applies `[resolve]`
+  policies when it mints policied conflicts — the changelog class dies at
+  birth now.
+- Divergence tripwire: mutating verbs compare `divergent()` count to a
+  baseline in navi state and warn on increase.
+- `navi tidy [--apply --yes]`: gc → policy sweep → guarded heal as one
+  idempotent verb (the runbook's mechanical steps).
+- `navi abandon -r <revset>`: bulk dead-subtree abandon, guarded against
+  working-copy chains and target ancestry; op-undoable, no archive needed.
+- Heal guards: empty-shell (with `--prefer-content` override) and
+  mainline (never abandon target-ancestry siblings for strays).
+- Census triage: `[BLOCKS TARGET]`/`[stranded]` per root, side counts,
+  change ids, `-r` scoping.
+- Perf: engine commit-prefix resolution moved from full-repo revset
+  sweeps to O(log n) index prefix lookups; doctor warns (with compaction
+  hint) when the op-log walk hits its cap. resolve --take: vetoed.
+
 ## sts_mods cleanup runbook (agreed, not yet executed)
 
 Repo: `~/src/personal/sts_mods` — 667 divergent changes (583 auto-healable),
@@ -125,10 +144,10 @@ NOTHING applied yet; every step needs Darin's explicit go.
 - `heal --workspace <ws>` consent flag: heal the live-blocked class for one
   workspace (snapshot → rebase its chain onto winner → update-stale);
   `possession` vs `newest-op` policy flag for the loser-is-a-live-@ class.
-- Auto-run `[resolve]` policies during `lane sync` / land gate.
-- Divergence tripwire: every navi op (or a watcher) diffs op-heads and
-  warns the moment a fresh divergence is minted.
-- Conflict strategies beyond union: ours/theirs per path, lockfile-regen.
+- Conflict strategies beyond union: lockfile-regen. (ours/theirs-style
+  `resolve --take` was vetoed.)
+- CLI setter for `[resolve]` policies (needs comment-preserving TOML
+  editing; hand-edit + `config show` for now).
 - `navi exec` capture-and-retry on stale (currently pre-emptive only).
 - fish/nushell shell integration (needs directive-protocol rework).
 - Op-churn/attribution: stamp agent identity into op metadata via exec.

@@ -109,6 +109,38 @@ enum Commands {
         #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
         json: bool,
     },
+    #[command(
+        about = "One-shot repair pipeline: workspace gc, [resolve] policies, guarded heal (plan by default)"
+    )]
+    Tidy {
+        #[arg(long, help = "Apply the plan instead of printing it")]
+        apply: bool,
+
+        #[arg(long, short = 'y', help = "Confirm the destructive gc phase when applying")]
+        yes: bool,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
+    },
+    #[command(
+        about = "Bulk-abandon dead subtrees by revset (guarded: never working copies or target ancestry)"
+    )]
+    Abandon {
+        #[arg(
+            long = "revisions",
+            short = 'r',
+            value_name = "REVSET",
+            required = true,
+            help = "Commits to abandon"
+        )]
+        revisions: String,
+
+        #[arg(long, help = "Apply instead of printing the plan")]
+        apply: bool,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
+    },
     #[command(about = "Census conflict roots: where conflicts begin, ranked by blast radius")]
     Conflicts {
         #[arg(
@@ -132,6 +164,15 @@ enum Commands {
             help = "Union-merge this repo-relative file at every conflict root; omit to sweep configured [resolve] policies"
         )]
         union: Option<String>,
+
+        #[arg(
+            long = "revisions",
+            short = 'r',
+            value_name = "REVSET",
+            requires = "union",
+            help = "Only resolve conflict roots in the ancestry of this revset (e.g. -r '::@')"
+        )]
+        revisions: Option<String>,
 
         #[arg(long, help = "Apply the resolutions instead of printing the plan")]
         apply: bool,
@@ -507,6 +548,8 @@ fn machine_context(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::Heal { json: true, .. } => Some("heal"),
         Commands::Conflicts { json: true, .. } => Some("conflicts"),
+        Commands::Tidy { json: true, .. } => Some("tidy"),
+        Commands::Abandon { json: true, .. } => Some("abandon"),
         Commands::Resolve { json: true, .. } => Some("resolve"),
         Commands::Remove { json: true, .. } => Some("remove"),
         Commands::Merge { json: true, .. } => Some("merge"),
@@ -571,11 +614,32 @@ fn dispatch(
                 },
             )?;
         }
+        Commands::Tidy { apply, yes, json } => {
+            commands::tidy::run_tidy(path, apply, yes, json)?;
+        }
+        Commands::Abandon {
+            revisions,
+            apply,
+            json,
+        } => {
+            commands::abandon::run_abandon(path, &revisions, apply, json)?;
+        }
         Commands::Conflicts { revisions, json } => {
             commands::resolve::run_conflicts(path, revisions.as_deref(), json)?;
         }
-        Commands::Resolve { union, apply, json } => match union {
-            Some(union) => commands::resolve::run_resolve_union(path, &union, apply, json)?,
+        Commands::Resolve {
+            union,
+            revisions,
+            apply,
+            json,
+        } => match union {
+            Some(union) => commands::resolve::run_resolve_union(
+                path,
+                &union,
+                revisions.as_deref(),
+                apply,
+                json,
+            )?,
             None => commands::resolve::run_resolve_policies(path, apply, json)?,
         },
         Commands::Exec { workspace, args } => {

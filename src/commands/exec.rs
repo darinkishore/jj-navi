@@ -42,7 +42,7 @@ pub fn run_exec(path: &Path, workspace: Option<&str>, args: &[OsString]) -> Resu
         }
     };
 
-    repo.with_mutation_lock(|| {
+    let exit = repo.with_mutation_lock(|| {
         // Umbrella: recover staleness before the user's command sees it.
         let _ = crate::repo::snapshot_working_copy_at(&target_root);
 
@@ -55,5 +55,7 @@ pub fn run_exec(path: &Path, workspace: Option<&str>, args: &[OsString]) -> Resu
             .status()?;
         let code = status.code().unwrap_or(1);
         Ok(ExitCode::from(u8::try_from(code).unwrap_or(1)))
-    })
+    })?;
+    repo.divergence_tripwire();
+    Ok(exit)
 }

@@ -342,3 +342,176 @@ fn heal_guards_empty_shell_winners() {
         "the kept sibling must carry the content: {survivor}"
     );
 }
+
+/// With a policy configured, `lane sync` heals policied conflicts itself:
+/// the conflict dies at birth instead of propagating.
+#[test]
+fn lane_sync_auto_applies_resolve_policies() {
+    let repo = TempJjRepo::new();
+    commit_file(repo.path(), "CHANGELOG.md", "# log\n- base\n", "Add changelog");
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "open", "alpha", "--path", "CHANGELOG.md"],
+    );
+    assert_success(&output, "lane open alpha");
+    repo.write_navi_config(
+        "workspace_template = \"../{repo}.{workspace}\"\n\n[resolve]\n\"CHANGELOG.md\" = \"union\"\n",
+    );
+    let lane = repo
+        .path()
+        .with_file_name(format!("{}.alpha", repo.repo_name()));
+    fs::write(lane.join("CHANGELOG.md"), "# log\n- base\n- alpha entry\n")
+        .expect("write lane changelog");
+    TempJjRepo::run_at(&lane, &["describe", "-m", "alpha entry"]);
+    commit_file(
+        repo.path(),
+        "CHANGELOG.md",
+        "# log\n- base\n- trunk entry\n",
+        "Trunk entry",
+    );
+
+    let output = command_output("navi", repo.path(), &["lane", "sync", "alpha"]);
+    assert_success(&output, "lane sync alpha");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("applying [resolve] policies"),
+        "sync should announce the auto-resolve"
+    );
+
+    let output = command_output("navi", repo.path(), &["conflicts", "--json"]);
+    assert_success(&output, "post-sync census");
+    let census: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("census envelope");
+    assert!(
+        census["result"]["roots"].as_array().expect("roots").is_empty(),
+        "sync should have auto-resolved the conflict: {census}"
+    );
+    let changelog = fs::read_to_string(lane.join("CHANGELOG.md")).expect("read changelog");
+    assert!(changelog.contains("alpha entry") && changelog.contains("trunk entry"));
+}
+
+/// `tidy --apply --yes` runs gc + policies + heal in one shot.
+#[test]
+fn tidy_runs_the_repair_pipeline() {
+    let repo = TempJjRepo::new();
+    commit_file(repo.path(), "base.txt", "base\n", "Base commit");
+    // Mint one healable divergence (same recipe as the heal test).
+    let base = repo.rev_id("@-");
+    commit_file(repo.path(), "detached.txt", "detached\n", "Detached work");
+    let target = repo.rev_id("@-");
+    TempJjRepo::run_at(repo.path(), &["new", &base]);
+    let op_before = TempJjRepo::run_at(
+        repo.path(),
+        &["op", "log", "-n1", "--no-graph", "-T", "id.short()"],
+    )
+    .trim()
+    .to_owned();
+    TempJjRepo::run_at(repo.path(), &["describe", &target, "-m", "first rewrite"]);
+    TempJjRepo::run_at(
+        repo.path(),
+        &["--at-operation", &op_before, "describe", &target, "-m", "divergent rewrite"],
+    );
+
+    // Plan first: no mutations without --apply.
+    let output = command_output("navi", repo.path(), &["tidy", "--json"]);
+    assert_success(&output, "tidy plan");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("tidy envelope");
+    assert_eq!(envelope["command"], "tidy");
+    assert_eq!(envelope["result"]["applied"], serde_json::Value::Bool(false));
+    assert!(
+        !envelope["result"]["heal"]["healed"].as_array().expect("healed").is_empty(),
+        "plan should include the divergence: {envelope}"
+    );
+
+    let output = command_output("navi", repo.path(), &["tidy", "--apply", "--yes", "--json"]);
+    assert_success(&output, "tidy apply");
+
+    let output = command_output("navi", repo.path(), &["heal", "--json"]);
+    assert_success(&output, "post-tidy heal check");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("heal envelope");
+    assert!(
+        envelope["result"]["healed"].as_array().expect("healed").is_empty(),
+        "tidy should have healed the divergence: {envelope}"
+    );
+}
+
+/// The tripwire warns when the divergent count rises past the baseline.
+#[test]
+fn divergence_tripwire_warns_on_new_divergence() {
+    let repo = TempJjRepo::new();
+    commit_file(repo.path(), "base.txt", "base\n", "Base commit");
+    // Establish a zero baseline.
+    let output = command_output("navi", repo.path(), &["exec", "--", "status"]);
+    assert_success(&output, "baseline exec");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("divergent commits rose"),
+        "no warning at zero divergence"
+    );
+
+    // Mint a divergence outside navi (raw jj, the exact hazard).
+    let base = repo.rev_id("@-");
+    commit_file(repo.path(), "detached.txt", "detached\n", "Detached work");
+    let target = repo.rev_id("@-");
+    TempJjRepo::run_at(repo.path(), &["new", &base]);
+    let op_before = TempJjRepo::run_at(
+        repo.path(),
+        &["op", "log", "-n1", "--no-graph", "-T", "id.short()"],
+    )
+    .trim()
+    .to_owned();
+    TempJjRepo::run_at(repo.path(), &["describe", &target, "-m", "first rewrite"]);
+    TempJjRepo::run_at(
+        repo.path(),
+        &["--at-operation", &op_before, "describe", &target, "-m", "divergent rewrite"],
+    );
+
+    let output = command_output("navi", repo.path(), &["exec", "--", "status"]);
+    assert_success(&output, "post-divergence exec");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("divergent commits rose from 0"),
+        "tripwire should fire: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Bulk abandon takes dead subtrees but refuses working-copy chains.
+#[test]
+fn abandon_bulk_removes_dead_subtrees_with_guards() {
+    let repo = TempJjRepo::new();
+    commit_file(repo.path(), "base.txt", "base\n", "Base commit");
+    let base = repo.rev_id("@-");
+    // A dead subtree: two stacked commits off base, no workspace on them.
+    TempJjRepo::run_at(repo.path(), &["new", &base]);
+    commit_file(repo.path(), "dead1.txt", "dead\n", "Dead one");
+    commit_file(repo.path(), "dead2.txt", "dead\n", "Dead two");
+    let dead_head = repo.rev_id("@-");
+    TempJjRepo::run_at(repo.path(), &["new", &base]);
+
+    // Refusal: the working copy's chain.
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["abandon", "-r", "::@", "--apply", "--json"],
+    );
+    assert!(!output.status.success(), "wc chain must be refused");
+
+    // The dead subtree goes, in one op.
+    let revset = format!("{base}..{dead_head}");
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["abandon", "-r", &revset, "--apply", "--json"],
+    );
+    assert_success(&output, "abandon dead subtree");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("abandon envelope");
+    assert_eq!(envelope["result"]["commits"].as_array().expect("commits").len(), 2);
+
+    let remaining = TempJjRepo::run_at(
+        repo.path(),
+        &["--ignore-working-copy", "log", "-r", "all()", "--no-graph", "-T", "description.first_line() ++ \"\\n\""],
+    );
+    assert!(!remaining.contains("Dead one"), "subtree gone: {remaining}");
+}

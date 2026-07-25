@@ -413,71 +413,113 @@ impl NaviWorkspace {
         Ok(snapshots)
     }
 
-    /// Merge one workspace's non-empty work into another workspace.
+    /// Merge work into a target workspace: duplicate a revset (or another
+    /// workspace's non-empty work) directly onto the target head and place
+    /// the target working copy on the duplicated head(s).
     ///
     /// # Errors
     ///
-    /// Returns an error if either workspace is missing, stale, not current, or
-    /// otherwise unsafe to use for a merge.
+    /// Returns an error if a named workspace is missing, stale, not current,
+    /// or otherwise unsafe, or if the duplicated work lands conflicted.
     pub fn merge_workspace(
         &self,
-        source: &WorkspaceName,
+        source: Option<&WorkspaceName>,
         target: Option<&WorkspaceName>,
+        revset: Option<&str>,
     ) -> Result<WorkspaceMergeOutcome> {
-        let merge = self.prepare_workspace_merge(source, target)?;
+        let merge = self.prepare_workspace_merge(source, target, revset)?;
         let jj = JjClient::new(&self.workspace_root);
-        let source_revset = source_revset(&merge.source.snapshot.name, &merge.target.snapshot.name);
-        let duplicate_output = jj.duplicate(&source_revset)?;
-        let duplicated_root_change_id =
-            parse_duplicated_change_id(&duplicate_output.stderr, &merge.source_root_commit_id)
-                .ok_or_else(|| Error::MergeDuplicateRootUnknown {
-                    source_workspace: merge.source.snapshot.name.as_str().to_owned(),
-                })?;
-        let duplicated_head_change_id =
-            parse_duplicated_change_id(&duplicate_output.stderr, &merge.source_head_commit_id)
-                .ok_or_else(|| Error::MergeDuplicateHeadUnknown {
-                    source_workspace: merge.source.snapshot.name.as_str().to_owned(),
-                })?;
+        let target_sym = workspace_symbol(&merge.target.snapshot.name);
 
-        let rebase_output =
-            jj.rebase_source_onto(&duplicated_root_change_id, &merge.target.snapshot.change_id)?;
+        // Children of the target working copy, before: the difference after
+        // duplication identifies the duplicated roots exactly, replacing the
+        // old stderr scrape of `Duplicated x as y` lines.
+        let before: std::collections::BTreeSet<String> = jj
+            .revisions(&format!("children({target_sym})"))?
+            .into_iter()
+            .map(|revision| revision.commit_id)
+            .collect();
+
+        let duplicate_output = jj.duplicate_onto(&merge.revset, &target_sym)?;
+
+        let duplicated_roots: Vec<String> = jj
+            .revisions(&format!("children({target_sym})"))?
+            .into_iter()
+            .map(|revision| revision.commit_id)
+            .filter(|commit_id| !before.contains(commit_id))
+            .collect();
+        if duplicated_roots.is_empty() {
+            return Err(Error::MergeDuplicateRootUnknown {
+                revset: merge.revset.clone(),
+            });
+        }
+
+        let roots_revset = duplicated_roots.join(" | ");
+        let duplicated_heads: Vec<String> = jj
+            .revisions(&format!("heads(descendants({roots_revset}))"))?
+            .into_iter()
+            .map(|revision| revision.commit_id)
+            .collect();
+        if duplicated_heads.is_empty() {
+            return Err(Error::MergeDuplicateRootUnknown {
+                revset: merge.revset.clone(),
+            });
+        }
+
         let target_jj = JjClient::new(&merge.target.snapshot.path.path);
-        let new_output = target_jj.new_working_copy(&duplicated_head_change_id)?;
-        if jj.has_conflicts(&duplicated_head_change_id)? {
-            let mut stderr = combine_command_output(&rebase_output);
+        let new_output = target_jj.new_working_copy_multi(&duplicated_heads)?;
+
+        let conflicted = jj.count(&format!("conflicts() & descendants({roots_revset})"))?;
+        if conflicted > 0 {
+            let mut stderr = combine_command_output(&duplicate_output);
             stderr.push_str(&combine_command_output(&new_output));
             return Err(Error::MergeRebaseFailed { stderr });
         }
 
         Ok(WorkspaceMergeOutcome {
             merge,
-            duplicated_root_change_id,
-            duplicated_head_change_id,
+            duplicated_roots,
+            duplicated_heads,
             duplicate_output: combine_command_output(&duplicate_output),
-            rebase_output: combine_command_output(&rebase_output),
             new_output: combine_command_output(&new_output),
         })
     }
 
     fn prepare_workspace_merge(
         &self,
-        source: &WorkspaceName,
+        source: Option<&WorkspaceName>,
         target: Option<&WorkspaceName>,
+        revset: Option<&str>,
     ) -> Result<WorkspaceMerge> {
         let target = target.unwrap_or(&self.current_workspace);
-        if source == target {
+        if let Some(source) = source
+            && source == target
+        {
             return Err(Error::MergeSameWorkspace(source.as_str().to_owned()));
         }
 
         let snapshots = self.list_merge_workspace_snapshots(source, target)?;
-        let source =
-            self.resolve_merge_workspace(&snapshots, source, WorkspaceMergeRole::Source)?;
+        let source = source
+            .map(|source| self.resolve_merge_workspace(&snapshots, source, WorkspaceMergeRole::Source))
+            .transpose()?;
         let target =
             self.resolve_merge_workspace(&snapshots, target, WorkspaceMergeRole::Target)?;
         let jj = JjClient::new(&self.workspace_root);
-        let source_revset = source_revset(&source.snapshot.name, &target.snapshot.name);
+        let revset = match (revset, &source) {
+            (Some(revset), _) => revset.to_owned(),
+            (None, Some(source)) => {
+                source_revset(&source.snapshot.name, &target.snapshot.name)
+            }
+            // The CLI requires --from or -r; this is a defensive fallback.
+            (None, None) => {
+                return Err(Error::MergeRevsetEmpty {
+                    revset: String::from("(none)"),
+                    target: target.snapshot.name.as_str().to_owned(),
+                });
+            }
+        };
         let revisions = jj
-            .revisions(&source_revset)?
+            .revisions(&revset)?
             .into_iter()
             .map(|revision| WorkspaceMergeRevision {
                 commit_id: revision.commit_id,
@@ -487,34 +529,40 @@ impl NaviWorkspace {
             .collect::<Vec<_>>();
 
         if revisions.is_empty() {
-            return Err(Error::MergeSourceEmpty {
-                source_workspace: source.snapshot.name.as_str().to_owned(),
-                target: target.snapshot.name.as_str().to_owned(),
+            return Err(match &source {
+                Some(source) => Error::MergeSourceEmpty {
+                    source_workspace: source.snapshot.name.as_str().to_owned(),
+                    target: target.snapshot.name.as_str().to_owned(),
+                },
+                None => Error::MergeRevsetEmpty {
+                    revset,
+                    target: target.snapshot.name.as_str().to_owned(),
+                },
             });
         }
-
-        let roots = jj.revisions(&format!("roots({source_revset})"))?;
-        let [root] = roots.as_slice() else {
-            return Err(Error::MergeSourceMultipleRoots {
-                source_workspace: source.snapshot.name.as_str().to_owned(),
-                target: target.snapshot.name.as_str().to_owned(),
-            });
-        };
-        let heads = jj.revisions(&format!("heads({source_revset})"))?;
-        let [head] = heads.as_slice() else {
-            return Err(Error::MergeSourceMultipleHeads {
-                source_workspace: source.snapshot.name.as_str().to_owned(),
-                target: target.snapshot.name.as_str().to_owned(),
-            });
-        };
 
         Ok(WorkspaceMerge {
             source,
             target,
+            revset,
             revisions,
-            source_root_commit_id: root.commit_id.clone(),
-            source_head_commit_id: head.commit_id.clone(),
         })
+    }
+
+    /// Resolve a workspace argument that may be a navi alias: `@` for the
+    /// current workspace, `-` for the previous one, `^` for the primary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the alias cannot be resolved or the name is
+    /// invalid.
+    pub fn resolve_workspace_alias(&self, value: &str) -> Result<WorkspaceName> {
+        match value {
+            "@" => Ok(self.current_workspace.clone()),
+            "-" => Ok(self.resolve_previous_workspace_path()?.0),
+            "^" => Ok(self.resolve_primary_workspace_path()?.0),
+            other => WorkspaceName::new(other),
+        }
     }
 
     fn discover_workspace_snapshots_with_metadata(
@@ -539,14 +587,15 @@ impl NaviWorkspace {
 
     fn list_merge_workspace_snapshots(
         &self,
-        source: &WorkspaceName,
+        source: Option<&WorkspaceName>,
         target: &WorkspaceName,
     ) -> Result<Vec<WorkspaceSnapshot>> {
         let metadata = WorkspaceMetadataStore::load(&self.repo_storage_path)?;
         let mut snapshots = self.discover_workspace_snapshots_with_metadata(&metadata)?;
 
         for snapshot in &mut snapshots {
-            let is_merge_side = snapshot.name == *source || snapshot.name == *target;
+            let is_merge_side =
+                source.is_some_and(|source| snapshot.name == *source) || snapshot.name == *target;
             let freshness = if is_merge_side {
                 match snapshot.path.state {
                     WorkspacePathState::Confirmed | WorkspacePathState::Inferred => {
@@ -915,17 +964,6 @@ fn source_revset(source: &WorkspaceName, target: &WorkspaceName) -> String {
 
 fn workspace_symbol(workspace: &WorkspaceName) -> String {
     super::jj::workspace_revset_symbol(workspace)
-}
-
-fn parse_duplicated_change_id(output: &str, source_root_commit_id: &str) -> Option<String> {
-    output.lines().find_map(|line| {
-        let line = line.strip_prefix("Duplicated ")?;
-        let (source_commit_id, duplicated) = line.split_once(" as ")?;
-        if source_commit_id != source_root_commit_id {
-            return None;
-        }
-        duplicated.split_whitespace().next().map(ToOwned::to_owned)
-    })
 }
 
 fn combine_command_output(output: &super::jj::JjCommandOutput) -> String {

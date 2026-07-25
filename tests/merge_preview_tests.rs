@@ -250,3 +250,66 @@ fn merge_preview_reports_rebase_conflict_with_recovery_hint() {
         ))
         .stderr(predicate::str::contains("jj resolve --list"));
 }
+
+#[test]
+fn merge_handles_multi_root_sources() {
+    let repo = TempJjRepo::new();
+    let feature_path = repo.create_workspace("feature-a");
+    // Two sibling roots relative to the target, joined by a merge working
+    // copy so both sit inside the source cone.
+    commit_file(&feature_path, "one.txt", "one\n", "Add one");
+    let one = change_id_at(&feature_path, "@-");
+    let base = change_id_at(&feature_path, "@--");
+    TempJjRepo::run_at(&feature_path, &["new", &base]);
+    commit_file(&feature_path, "two.txt", "two\n", "Add two");
+    let two = change_id_at(&feature_path, "@-");
+    TempJjRepo::run_at(&feature_path, &["new", &one, &two]);
+
+    command("navi")
+        .current_dir(repo.path())
+        .args(["merge", "--from", "feature-a", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Merged 2 changes from feature-a into default"));
+
+    assert!(repo.path().join("one.txt").exists());
+    assert!(repo.path().join("two.txt").exists());
+}
+
+#[test]
+fn merge_accepts_explicit_revset() {
+    let repo = TempJjRepo::new();
+    let feature_path = repo.create_workspace("feature-a");
+    commit_file(&feature_path, "wanted.txt", "wanted\n", "Add wanted");
+    let wanted = change_id_at(&feature_path, "@-");
+    commit_file(&feature_path, "unwanted.txt", "unwanted\n", "Add unwanted");
+
+    command("navi")
+        .current_dir(repo.path())
+        .args(["merge", "-r", &wanted])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("into default"));
+
+    assert!(repo.path().join("wanted.txt").exists());
+    assert!(
+        !repo.path().join("unwanted.txt").exists(),
+        "revset merge must not bring unselected changes"
+    );
+}
+
+#[test]
+fn merge_resolves_current_workspace_alias_for_target() {
+    let repo = TempJjRepo::new();
+    let feature_path = repo.create_workspace("feature-a");
+    commit_file(&feature_path, "feature.txt", "feature\n", "Add feature");
+
+    command("navi")
+        .current_dir(repo.path())
+        .args(["merge", "--from", "feature-a", "--into", "@"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("into default"));
+
+    assert!(repo.path().join("feature.txt").exists());
+}

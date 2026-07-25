@@ -797,16 +797,15 @@ pub struct WorkspaceListEntry {
 /// Executable merge operation across JJ workspaces.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceMerge {
-    /// Workspace that contains work to bring over.
-    pub source: WorkspaceMergeSide,
+    /// Workspace that contains work to bring over, when merging a whole
+    /// workspace rather than an explicit revset.
+    pub source: Option<WorkspaceMergeSide>,
     /// Workspace that should receive the duplicated work.
     pub target: WorkspaceMergeSide,
-    /// Non-empty source revisions selected for duplicate/rebase.
+    /// Revset selecting the work to duplicate.
+    pub revset: String,
+    /// Revisions the revset selected.
     pub revisions: Vec<WorkspaceMergeRevision>,
-    /// Source root commit used as the rebase source after duplication.
-    pub source_root_commit_id: String,
-    /// Source head commit used to place the target workspace after rebase.
-    pub source_head_commit_id: String,
 }
 
 /// Snapshot details included for each side of a workspace merge.
@@ -834,14 +833,12 @@ pub struct WorkspaceMergeRevision {
 pub struct WorkspaceMergeOutcome {
     /// Prepared operation inputs.
     pub merge: WorkspaceMerge,
-    /// Change ID created by `jj duplicate` for the source root.
-    pub duplicated_root_change_id: String,
-    /// Change ID created by `jj duplicate` for the source head.
-    pub duplicated_head_change_id: String,
+    /// Commit ids of the duplicated roots (children of the target head).
+    pub duplicated_roots: Vec<String>,
+    /// Commit ids of the duplicated heads the working copy was placed on.
+    pub duplicated_heads: Vec<String>,
     /// Raw `jj duplicate` diagnostic output.
     pub duplicate_output: String,
-    /// Raw `jj rebase` diagnostic output.
-    pub rebase_output: String,
     /// Raw `jj new` diagnostic output from updating the target workspace.
     pub new_output: String,
 }

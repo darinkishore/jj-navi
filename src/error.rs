@@ -119,44 +119,24 @@ pub enum Error {
         target: String,
     },
 
-    /// Merge source has a shape this command does not handle safely yet.
+    /// The merge revset selected no non-empty revisions.
     #[error(
-        "error: merge source workspace '{source_workspace}' has multiple independent roots relative to target workspace '{target}'\nhint: merge one linear workspace stack at a time"
+        "error: merge revset '{revset}' selects no non-empty changes to merge into target workspace '{target}'"
     )]
-    MergeSourceMultipleRoots {
-        /// Source workspace name.
-        source_workspace: String,
+    MergeRevsetEmpty {
+        /// Requested revset.
+        revset: String,
         /// Target workspace name.
         target: String,
     },
 
-    /// Merge source has a shape this command does not handle safely yet.
+    /// `jj duplicate` succeeded but Navi could not identify the duplicates.
     #[error(
-        "error: merge source workspace '{source_workspace}' has multiple independent heads relative to target workspace '{target}'\nhint: merge one linear workspace stack at a time"
-    )]
-    MergeSourceMultipleHeads {
-        /// Source workspace name.
-        source_workspace: String,
-        /// Target workspace name.
-        target: String,
-    },
-
-    /// `jj duplicate` succeeded but Navi could not identify the duplicated root.
-    #[error(
-        "error: duplicated source workspace '{source_workspace}', but could not identify the duplicated root change\nhint: rebase was not attempted; inspect the new duplicate with jj log"
+        "error: duplicated '{revset}', but could not identify the duplicated changes\nhint: inspect the new duplicates with jj log; jj op undo reverses the duplication"
     )]
     MergeDuplicateRootUnknown {
-        /// Source workspace name.
-        source_workspace: String,
-    },
-
-    /// `jj duplicate` succeeded but Navi could not identify the duplicated head.
-    #[error(
-        "error: duplicated source workspace '{source_workspace}', but could not identify the duplicated head change\nhint: rebase was not attempted; inspect the new duplicate with jj log"
-    )]
-    MergeDuplicateHeadUnknown {
-        /// Source workspace name.
-        source_workspace: String,
+        /// Duplicated revset.
+        revset: String,
     },
 
     /// `jj rebase` failed after duplication.
@@ -532,10 +512,8 @@ impl Error {
             Self::MergeWorkspaceAmbiguous { .. } => "merge-workspace-ambiguous",
             Self::MergeWorkspaceUnavailable { .. } => "merge-workspace-unavailable",
             Self::MergeSourceEmpty { .. } => "merge-source-empty",
-            Self::MergeSourceMultipleRoots { .. } => "merge-source-multiple-roots",
-            Self::MergeSourceMultipleHeads { .. } => "merge-source-multiple-heads",
-            Self::MergeDuplicateRootUnknown { .. } => "merge-duplicate-root-unknown",
-            Self::MergeDuplicateHeadUnknown { .. } => "merge-duplicate-head-unknown",
+            Self::MergeRevsetEmpty { .. } => "merge-revset-empty",
+            Self::MergeDuplicateRootUnknown { .. } => "merge-duplicates-unknown",
             Self::MergeRebaseFailed { .. } => "merge-rebase-failed",
             Self::WorkspaceDirectoryDeleteAfterForgetFailed { .. } => {
                 "workspace-directory-delete-failed"

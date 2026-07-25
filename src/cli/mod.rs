@@ -156,23 +156,32 @@ enum Commands {
         #[arg(help = "Workspace name to remove", add = completion::workspace_value_completer())]
         workspace: String,
     },
-    #[command(about = "Merge work from another JJ workspace")]
+    #[command(about = "Merge work from another JJ workspace or an explicit revset")]
     Merge {
         #[arg(
             long,
             short = 'f',
-            help = "Source workspace to merge from",
+            required_unless_present = "revisions",
+            help = "Source workspace to merge from ('@', '-', '^' aliases work)",
             add = completion::workspace_value_completer()
         )]
-        from: String,
+        from: Option<String>,
 
         #[arg(
             long,
             short = 'i',
-            help = "Target workspace to merge into; defaults to current",
+            help = "Target workspace to merge into; defaults to current ('@', '-', '^' aliases work)",
             add = completion::workspace_value_completer()
         )]
         into: Option<String>,
+
+        #[arg(
+            long = "revisions",
+            short = 'r',
+            value_name = "REVSET",
+            help = "Merge exactly this revset instead of a source workspace's work"
+        )]
+        revisions: Option<String>,
 
         #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
         json: bool,
@@ -541,8 +550,19 @@ fn dispatch(
         } => {
             commands::remove::run_remove(path, &workspace, yes, json)?;
         }
-        Commands::Merge { from, into, json } => {
-            commands::merge::run_merge(path, &from, into.as_deref(), json)?;
+        Commands::Merge {
+            from,
+            into,
+            revisions,
+            json,
+        } => {
+            commands::merge::run_merge(
+                path,
+                from.as_deref(),
+                into.as_deref(),
+                revisions.as_deref(),
+                json,
+            )?;
         }
         Commands::Lane { command } => match command {
             LaneCommands::Open {

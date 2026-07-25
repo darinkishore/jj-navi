@@ -329,8 +329,17 @@ impl<'a> JjClient<'a> {
             .collect()
     }
 
-    pub(crate) fn duplicate(&self, revset: &str) -> Result<JjCommandOutput> {
-        self.run_capture(&[OsString::from("duplicate"), OsString::from(revset)])
+    /// Duplicate a revset directly onto a destination revision. jj rebases
+    /// the duplicates onto the destination itself, so multi-root and
+    /// multi-head sources work without any follow-up rebase.
+    pub(crate) fn duplicate_onto(&self, revset: &str, destination: &str) -> Result<JjCommandOutput> {
+        self.run_capture(&[
+            OsString::from("duplicate"),
+            OsString::from("-r"),
+            OsString::from(revset),
+            OsString::from("-d"),
+            OsString::from(destination),
+        ])
     }
 
     /// Resolve one conflicted file in `revision` to prepared content.
@@ -388,28 +397,18 @@ impl<'a> JjClient<'a> {
         .map(|_| ())
     }
 
-    pub(crate) fn rebase_source_onto(&self, source: &str, target: &str) -> Result<JjCommandOutput> {
-        let output = self.run_capture(&[
-            OsString::from("rebase"),
-            OsString::from("-s"),
-            OsString::from(source),
-            OsString::from("-d"),
-            OsString::from(target),
-        ]);
-
-        output.map_err(|error| match error {
-            Error::JjCommandFailed { stderr, .. } => Error::MergeRebaseFailed { stderr },
-            other => other,
-        })
+    /// Move this workspace's working copy onto a new commit with the given
+    /// parents (multi-parent merge commits allowed).
+    pub(crate) fn new_working_copy_multi(&self, revisions: &[String]) -> Result<JjCommandOutput> {
+        let mut args = vec![OsString::from("new")];
+        for revision in revisions {
+            args.push(OsString::from(revision));
+        }
+        self.run_capture(&args)
     }
 
     pub(crate) fn new_working_copy(&self, revision: &str) -> Result<JjCommandOutput> {
         self.run_capture(&[OsString::from("new"), OsString::from(revision)])
-    }
-
-    pub(crate) fn has_conflicts(&self, revision: &str) -> Result<bool> {
-        let revset = format!("{revision} & conflicts()");
-        Ok(!self.revisions(&revset)?.is_empty())
     }
 
     pub(crate) fn workspace_root(&self, workspace: &WorkspaceName) -> Result<PathBuf> {

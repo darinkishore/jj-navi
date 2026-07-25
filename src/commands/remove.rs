@@ -14,8 +14,8 @@ use crate::types::WorkspaceName;
 /// Returns an error if workspace validation, discovery, confirmation,
 /// `jj workspace forget`, or directory deletion fails.
 pub fn run_remove(path: &Path, workspace: &str, yes: bool, json: bool) -> Result<()> {
-    let workspace = WorkspaceName::new(workspace.to_owned())?;
     let repo = NaviWorkspace::open(path)?;
+    let workspace = repo.resolve_workspace_alias(workspace)?;
     let target_root = repo.resolve_removable_workspace_path(&workspace)?;
 
     // Snapshot (best-effort, bounded) so the archive reflects on-disk work,

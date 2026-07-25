@@ -3,7 +3,6 @@ use std::path::Path;
 use crate::Result;
 use crate::output::render_merge_outcome;
 use crate::repo::NaviWorkspace;
-use crate::types::WorkspaceName;
 
 /// Run the `merge` command.
 ///
@@ -11,13 +10,21 @@ use crate::types::WorkspaceName;
 ///
 /// Returns an error if source or target resolution fails, if either workspace
 /// is unhealthy, or if `jj duplicate`/`jj rebase` fails.
-pub fn run_merge(path: &Path, from: &str, into: Option<&str>, json: bool) -> Result<()> {
+pub fn run_merge(
+    path: &Path,
+    from: Option<&str>,
+    into: Option<&str>,
+    revisions: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
-    let source = WorkspaceName::new(from.to_owned())?;
-    let target = into
-        .map(|workspace| WorkspaceName::new(workspace.to_owned()))
+    let source = from
+        .map(|workspace| repo.resolve_workspace_alias(workspace))
         .transpose()?;
-    let outcome = repo.merge_workspace(&source, target.as_ref())?;
+    let target = into
+        .map(|workspace| repo.resolve_workspace_alias(workspace))
+        .transpose()?;
+    let outcome = repo.merge_workspace(source.as_ref(), target.as_ref(), revisions)?;
 
     eprint!("{}", render_merge_outcome(&outcome));
     if json {
@@ -29,11 +36,12 @@ pub fn run_merge(path: &Path, from: &str, into: Option<&str>, json: bool) -> Res
         }
         #[derive(serde::Serialize)]
         struct MergeResult<'a> {
-            source: &'a str,
+            source: Option<&'a str>,
             target: &'a str,
+            revset: &'a str,
             revisions: Vec<MergeRevisionJson<'a>>,
-            duplicated_root_change_id: &'a str,
-            duplicated_head_change_id: &'a str,
+            duplicated_roots: &'a [String],
+            duplicated_heads: &'a [String],
         }
         let merge = &outcome.merge;
         println!(
@@ -41,8 +49,12 @@ pub fn run_merge(path: &Path, from: &str, into: Option<&str>, json: bool) -> Res
             crate::output::render_json_envelope(
                 "merge",
                 &MergeResult {
-                    source: merge.source.snapshot.name.as_str(),
+                    source: merge
+                        .source
+                        .as_ref()
+                        .map(|source| source.snapshot.name.as_str()),
                     target: merge.target.snapshot.name.as_str(),
+                    revset: &merge.revset,
                     revisions: merge
                         .revisions
                         .iter()
@@ -52,8 +64,8 @@ pub fn run_merge(path: &Path, from: &str, into: Option<&str>, json: bool) -> Res
                             message: &revision.message,
                         })
                         .collect(),
-                    duplicated_root_change_id: &outcome.duplicated_root_change_id,
-                    duplicated_head_change_id: &outcome.duplicated_head_change_id,
+                    duplicated_roots: &outcome.duplicated_roots,
+                    duplicated_heads: &outcome.duplicated_heads,
                 }
             )?
         );

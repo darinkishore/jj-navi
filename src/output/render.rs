@@ -249,22 +249,30 @@ pub fn render_merge_outcome(outcome: &WorkspaceMergeOutcome) -> String {
     let mut output = String::new();
     let merge = &outcome.merge;
 
+    let source_label = merge.source.as_ref().map_or_else(
+        || format!("revset '{}'", merge.revset),
+        |source| source.snapshot.name.to_string(),
+    );
     writeln!(
         output,
         "Merged {} from {} into {}",
         pluralize(merge.revisions.len(), "change"),
-        merge.source.snapshot.name,
+        source_label,
         merge.target.snapshot.name,
     )
     .expect("write merge success");
-    writeln!(
-        output,
-        "  source: {}  change {}  commit {}",
-        merge.source.snapshot.name,
-        style_meta(&merge.source.snapshot.change_id),
-        style_meta(&merge.source.snapshot.commit_id),
-    )
-    .expect("write merge source");
+    if let Some(source) = &merge.source {
+        writeln!(
+            output,
+            "  source: {}  change {}  commit {}",
+            source.snapshot.name,
+            style_meta(&source.snapshot.change_id),
+            style_meta(&source.snapshot.commit_id),
+        )
+        .expect("write merge source");
+    } else {
+        writeln!(output, "  revset: {}", merge.revset).expect("write merge revset");
+    }
     writeln!(
         output,
         "  target: {}  change {}  commit {}",
@@ -275,25 +283,22 @@ pub fn render_merge_outcome(outcome: &WorkspaceMergeOutcome) -> String {
     .expect("write merge target");
     writeln!(
         output,
-        "  duplicate root: {}",
-        style_meta(&outcome.duplicated_root_change_id),
+        "  duplicate roots: {}",
+        style_meta(&outcome.duplicated_roots.join(", ")),
     )
-    .expect("write duplicate root");
+    .expect("write duplicate roots");
     writeln!(
         output,
-        "  duplicate head: {}",
-        style_meta(&outcome.duplicated_head_change_id),
+        "  duplicate heads: {}",
+        style_meta(&outcome.duplicated_heads.join(", ")),
     )
-    .expect("write duplicate head");
-    writeln!(
-        output,
-        "  diff: {}",
-        render_diff_plain(&merge.source.snapshot.diff)
-    )
-    .expect("write merge diff");
+    .expect("write duplicate heads");
+    if let Some(source) = &merge.source {
+        writeln!(output, "  diff: {}", render_diff_plain(&source.snapshot.diff))
+            .expect("write merge diff");
+    }
 
     append_command_output(&mut output, &outcome.duplicate_output);
-    append_command_output(&mut output, &outcome.rebase_output);
     append_command_output(&mut output, &outcome.new_output);
 
     output

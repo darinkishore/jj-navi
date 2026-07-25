@@ -204,6 +204,16 @@ fn resolve_union_handles_many_sided_conflicts_with_dedup() {
     );
     TempJjRepo::run_at(repo.path(), &["new"]);
 
+    // The census must report the side count so callers can route.
+    let output = command_output("navi", repo.path(), &["conflicts", "--json"]);
+    assert_success(&output, "pre-resolve census");
+    let census: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("census envelope");
+    let root = &census["result"]["roots"][0];
+    assert_eq!(root["files"][0]["path"], "log.md");
+    assert_eq!(root["files"][0]["sides"], 3);
+    assert!(root["change_id"].is_string(), "census carries change ids");
+
     let output = command_output(
         "navi",
         repo.path(),
@@ -245,5 +255,90 @@ fn resolve_union_handles_many_sided_conflicts_with_dedup() {
     assert!(
         !workspaces.contains("navi-resolve"),
         "scratch workspace cleaned up: {workspaces}"
+    );
+}
+
+/// The newest sibling being an empty shell must not beat a sibling with
+/// content: default skips, --prefer-content keeps the content.
+#[test]
+fn heal_guards_empty_shell_winners() {
+    let repo = TempJjRepo::new();
+    commit_file(repo.path(), "base.txt", "base\n", "Base commit");
+    let base = repo.rev_id("@-");
+    // Park a described-but-empty commit K off to the side.
+    TempJjRepo::run_at(repo.path(), &["new", &base]);
+    TempJjRepo::run_at(repo.path(), &["describe", "-m", "content sibling"]);
+    let target = repo.rev_id("@");
+    TempJjRepo::run_at(repo.path(), &["new", &base]);
+
+    let op_before = TempJjRepo::run_at(
+        repo.path(),
+        &["op", "log", "-n1", "--no-graph", "-T", "id.short()"],
+    )
+    .trim()
+    .to_owned();
+    // Older op branch: squash real content into K.
+    fs::write(repo.path().join("f.txt"), "content\n").expect("write content");
+    TempJjRepo::run_at(repo.path(), &["squash", "--into", &target]);
+    // Newest op branch (at-op always runs later): re-describe the old
+    // empty version of K — a shell with a message and no content.
+    TempJjRepo::run_at(
+        repo.path(),
+        &[
+            "--ignore-working-copy",
+            "--at-operation",
+            &op_before,
+            "describe",
+            &target,
+            "-m",
+            "empty shell",
+        ],
+    );
+
+    let output = command_output("navi", repo.path(), &["heal", "--json"]);
+    assert_success(&output, "heal plan");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("heal envelope");
+    let skipped = envelope["result"]["skipped"].as_array().expect("skipped");
+    assert!(
+        skipped
+            .iter()
+            .any(|skip| skip["reason"].as_str().is_some_and(|reason| reason.contains("empty shell"))),
+        "empty-shell winner must be skipped by default: {envelope}"
+    );
+
+    let output = command_output("navi", repo.path(), &["heal", "--prefer-content", "--json"]);
+    assert_success(&output, "heal --prefer-content plan");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("heal envelope");
+    let healed = envelope["result"]["healed"].as_array().expect("healed");
+    assert!(
+        !healed.is_empty(),
+        "--prefer-content should plan the heal: {envelope}"
+    );
+
+    let kept = healed[0]["keep_commit"].as_str().expect("keep commit").to_owned();
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["heal", "--prefer-content", "--apply", "--json"],
+    );
+    assert_success(&output, "heal --prefer-content apply");
+    // The surviving sibling must be the content-carrying one.
+    let survivor = TempJjRepo::run_at(
+        repo.path(),
+        &[
+            "--ignore-working-copy",
+            "file",
+            "show",
+            "-r",
+            &kept,
+            "f.txt",
+        ],
+    );
+    assert!(
+        survivor.contains("content"),
+        "the kept sibling must carry the content: {survivor}"
     );
 }

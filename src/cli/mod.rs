@@ -100,11 +100,25 @@ enum Commands {
         #[arg(long, default_value_t = 100, help = "Maximum changes healed per run")]
         limit: usize,
 
+        #[arg(
+            long,
+            help = "When the newest sibling is an empty shell, keep the newest content-carrying sibling instead"
+        )]
+        prefer_content: bool,
+
         #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
         json: bool,
     },
     #[command(about = "Census conflict roots: where conflicts begin, ranked by blast radius")]
     Conflicts {
+        #[arg(
+            long = "revisions",
+            short = 'r',
+            value_name = "REVSET",
+            help = "Only census conflicts in the ancestry of this revset (e.g. -r main)"
+        )]
+        revisions: Option<String>,
+
         #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
         json: bool,
     },
@@ -492,7 +506,7 @@ fn try_run(
 fn machine_context(command: &Commands) -> Option<&'static str> {
     match command {
         Commands::Heal { json: true, .. } => Some("heal"),
-        Commands::Conflicts { json: true } => Some("conflicts"),
+        Commands::Conflicts { json: true, .. } => Some("conflicts"),
         Commands::Resolve { json: true, .. } => Some("resolve"),
         Commands::Remove { json: true, .. } => Some("remove"),
         Commands::Merge { json: true, .. } => Some("merge"),
@@ -541,6 +555,7 @@ fn dispatch(
             mine,
             apply,
             limit,
+            prefer_content,
             json,
         } => {
             let limit = commands::heal::validated_limit(limit)?;
@@ -551,11 +566,14 @@ fn dispatch(
                     mine,
                     apply,
                     limit,
+                    prefer_content,
                     json,
                 },
             )?;
         }
-        Commands::Conflicts { json } => commands::resolve::run_conflicts(path, json)?,
+        Commands::Conflicts { revisions, json } => {
+            commands::resolve::run_conflicts(path, revisions.as_deref(), json)?;
+        }
         Commands::Resolve { union, apply, json } => match union {
             Some(union) => commands::resolve::run_resolve_union(path, &union, apply, json)?,
             None => commands::resolve::run_resolve_policies(path, apply, json)?,

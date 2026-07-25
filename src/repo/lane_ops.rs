@@ -938,6 +938,13 @@ impl NaviWorkspace {
         })
     }
 
+    /// The landing target's label and head commit, for annotation surfaces
+    /// (heal, conflicts census). Works in both bookmark and legacy mode.
+    pub(crate) fn landing_target_head(&self) -> Result<(String, String)> {
+        let trunk = self.resolve_trunk()?;
+        Ok((trunk.label(), trunk.head_commit))
+    }
+
     fn trunk_workspace_root(&self, name: &WorkspaceName) -> Result<PathBuf> {
         if *self.current_workspace_name() == *name {
             return Ok(self.workspace_root().to_path_buf());

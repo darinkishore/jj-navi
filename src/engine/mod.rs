@@ -72,6 +72,9 @@ pub struct DivergentSibling {
     pub wc_of: Vec<String>,
     /// Whether the sibling has visible child commits.
     pub has_children: bool,
+    /// Whether the sibling's tree equals its parents' merged tree (an
+    /// empty shell: no content of its own).
+    pub is_empty: bool,
     /// Whether some workspace's working copy is this commit or one of its
     /// descendants (touching it would rewrite a live chain from outside).
     pub blocks_wc: bool,
@@ -201,6 +204,8 @@ impl Engine {
                     .store()
                     .get_commit(&id)
                     .map_err(|error| engine_error("load commit", error))?;
+                let is_empty = pollster::block_on(commit.is_empty(repo))
+                    .map_err(|error| engine_error("check empty commit", error))?;
                 siblings.push(DivergentSibling {
                     commit_id: short_hex(&id.hex()),
                     description: commit
@@ -214,6 +219,7 @@ impl Engine {
                     op: provenance.get(&id).cloned(),
                     wc_of: wc_of.get(&id).cloned().unwrap_or_default(),
                     has_children: children.contains(&id),
+                    is_empty,
                     blocks_wc: blocked.contains(&id),
                 });
             }
@@ -384,10 +390,29 @@ fn union_hunk_lines<T: AsRef<[u8]>>(merged: &mut Vec<u8>, sides: impl Iterator<I
 pub struct ConflictRoot {
     /// Commit id (short hex), usable in revsets.
     pub commit_id: String,
+    /// Change id (short reverse-hex): stable across the rebases a
+    /// resolution triggers.
+    pub change_id: String,
     /// Number of visible descendants (including self) that carry conflicts.
     pub conflicted_descendants: usize,
     /// Conflicted repo-relative paths in this commit's tree.
     pub paths: Vec<String>,
+    /// Conflicted paths with their side counts (after simplification).
+    pub files: Vec<ConflictedFile>,
+    /// Whether this root sits in the landing target's ancestry (set by the
+    /// census when a target is configured; `None` otherwise). Stranded
+    /// roots (false) block nothing and are cleanup, not emergencies.
+    pub blocks_target: Option<bool>,
+}
+
+/// One conflicted path in a conflict root's tree.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ConflictedFile {
+    /// Repo-relative path.
+    pub path: String,
+    /// Number of conflict sides after simplification. 2-sided conflicts
+    /// apply via jj resolve; more sides use navi's squash path.
+    pub sides: usize,
 }
 
 impl Engine {
@@ -396,12 +421,22 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error if revset evaluation or tree reads fail.
-    pub fn conflict_roots(&self) -> Result<Vec<ConflictRoot>> {
+    pub fn conflict_roots(&self, within: Option<&[String]>) -> Result<Vec<ConflictRoot>> {
         use jj_lib::revset::RevsetFilterPredicate;
 
         let repo = self.repo.as_ref();
-        let conflicted = RevsetExpression::all()
+        // Optional scope: only conflicts in the ancestry of these commits.
+        let scope = match within {
+            Some(prefixes) => Some(
+                RevsetExpression::commits(self.resolve_many_prefixes(prefixes)?).ancestors(),
+            ),
+            None => None,
+        };
+        let mut conflicted = RevsetExpression::all()
             .filtered(RevsetFilterPredicate::HasConflict);
+        if let Some(scope) = &scope {
+            conflicted = conflicted.intersection(scope);
+        }
         let roots_expr = conflicted.roots();
         let revset = roots_expr
             .evaluate(repo)
@@ -418,14 +453,23 @@ impl Engine {
                 .get_commit(&id)
                 .map_err(|error| engine_error("load conflict root", error))?;
             let tree = commit.tree();
-            let paths: Vec<String> = tree
+            let files: Vec<ConflictedFile> = tree
                 .conflicts()
-                .map(|(path, _value)| path.as_internal_file_string().to_owned())
+                .map(|(path, value)| ConflictedFile {
+                    path: path.as_internal_file_string().to_owned(),
+                    sides: value
+                        .map(|value| value.simplify().adds().count())
+                        .unwrap_or_default(),
+                })
                 .collect();
+            let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
 
-            let blast = RevsetExpression::commits(vec![id.clone()])
+            let mut blast = RevsetExpression::commits(vec![id.clone()])
                 .descendants()
                 .filtered(RevsetFilterPredicate::HasConflict);
+            if let Some(scope) = &scope {
+                blast = blast.intersection(scope);
+            }
             let revset = blast
                 .evaluate(repo)
                 .map_err(|error| engine_error("evaluate blast radius", error))?;
@@ -436,12 +480,60 @@ impl Engine {
 
             roots.push(ConflictRoot {
                 commit_id: short_hex(&id.hex()),
+                change_id: reverse_hex(&commit.change_id().hex()),
                 conflicted_descendants: conflicted_descendants.len(),
                 paths,
+                files,
+                blocks_target: None,
             });
         }
         roots.sort_by_key(|root| std::cmp::Reverse(root.conflicted_descendants));
         Ok(roots)
+    }
+
+    /// Resolve many (possibly short) hex commit ids in one visible-commit
+    /// sweep.
+    fn resolve_many_prefixes(&self, prefixes: &[String]) -> Result<Vec<CommitId>> {
+        let repo = self.repo.as_ref();
+        let expr = RevsetExpression::all();
+        let revset = expr
+            .evaluate(repo)
+            .map_err(|error| engine_error("evaluate all()", error))?;
+        let ids: Vec<CommitId> = pollster::block_on(revset.stream().try_collect())
+            .map_err(|error| engine_error("resolve commit ids", error))?;
+        drop(revset);
+        prefixes
+            .iter()
+            .map(|prefix| {
+                ids.iter()
+                    .find(|id| id.hex().starts_with(prefix.as_str()))
+                    .cloned()
+                    .ok_or_else(|| Error::Engine {
+                        message: format!("commit {prefix} not found"),
+                    })
+            })
+            .collect()
+    }
+
+    /// Which of `candidates` (short hex commit ids) are ancestors of
+    /// `of_commit` (inclusive). One revset evaluation for the whole batch.
+    pub fn ancestry_members(
+        &self,
+        of_commit: &str,
+        candidates: &[String],
+    ) -> Result<HashSet<String>> {
+        let repo = self.repo.as_ref();
+        let target = self.resolve_commit_prefix(of_commit)?;
+        let candidate_ids = self.resolve_many_prefixes(candidates)?;
+        let expr = RevsetExpression::commits(candidate_ids)
+            .intersection(&RevsetExpression::commits(vec![target]).ancestors());
+        let revset = expr
+            .evaluate(repo)
+            .map_err(|error| engine_error("evaluate ancestry members", error))?;
+        let members: Vec<CommitId> = pollster::block_on(revset.stream().try_collect())
+            .map_err(|error| engine_error("collect ancestry members", error))?;
+        drop(revset);
+        Ok(members.iter().map(|id| short_hex(&id.hex())).collect())
     }
 
     /// Resolve a (possibly short) hex commit id against the repo snapshot.

@@ -17,10 +17,51 @@ use crate::{Error, Result};
 /// # Errors
 ///
 /// Returns an error if the repo or engine cannot be opened.
-pub fn run_conflicts(path: &Path, json: bool) -> Result<()> {
+pub fn run_conflicts(path: &Path, revisions: Option<&str>, json: bool) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let engine = repo.open_engine()?;
-    let roots = engine.conflict_roots()?;
+
+    // Optional scope: only conflicts in the ancestry of this revset.
+    let scope: Option<Vec<String>> = revisions
+        .map(|revset| -> Result<Vec<String>> {
+            let heads = repo.main_jj_client().revisions(revset)?;
+            if heads.is_empty() {
+                return Err(Error::Engine {
+                    message: format!("revset '{revset}' matches no commits"),
+                });
+            }
+            Ok(heads.into_iter().map(|head| head.commit_id).collect())
+        })
+        .transpose()?;
+    let mut roots = engine.conflict_roots(scope.as_deref())?;
+
+    // Triage against the landing target: roots outside its ancestry are
+    // stranded cleanup, not push-blockers. Best-effort — repos without a
+    // resolvable target just skip the annotation.
+    let target = if scope.is_none() {
+        repo.landing_target_head().ok()
+    } else {
+        None
+    };
+    if let Some((label, head_commit)) = &target
+        && !roots.is_empty()
+    {
+        let ids: Vec<String> = roots.iter().map(|root| root.commit_id.clone()).collect();
+        if let Ok(members) = engine.ancestry_members(head_commit, &ids) {
+            for root in &mut roots {
+                root.blocks_target = Some(members.contains(&root.commit_id));
+            }
+        }
+        let blocking = roots
+            .iter()
+            .filter(|root| root.blocks_target == Some(true))
+            .count();
+        if blocking == 0 {
+            eprintln!("{label} ancestry is conflict-free; everything below is stranded cleanup");
+        } else {
+            eprintln!("{blocking} conflict root(s) BLOCK {label}");
+        }
+    }
 
     if roots.is_empty() {
         eprintln!("no conflicted commits");
@@ -31,15 +72,23 @@ pub fn run_conflicts(path: &Path, json: bool) -> Result<()> {
             roots.len()
         );
         for root in &roots {
+            let files = if root.files.is_empty() {
+                String::from("(none in tree?)")
+            } else {
+                root.files
+                    .iter()
+                    .map(|file| format!("{} ({} sides)", file.path, file.sides))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let tag = match root.blocks_target {
+                Some(true) => "  [BLOCKS TARGET]",
+                Some(false) => "  [stranded]",
+                None => "",
+            };
             eprintln!(
-                "  {}  blast {}  files: {}",
-                root.commit_id,
-                root.conflicted_descendants,
-                if root.paths.is_empty() {
-                    String::from("(none in tree?)")
-                } else {
-                    root.paths.join(", ")
-                }
+                "  {}  blast {}{tag}  files: {files}",
+                root.commit_id, root.conflicted_descendants,
             );
         }
         eprintln!();
@@ -160,7 +209,7 @@ fn resolve_union_file(
             // Re-open the engine each pass: every applied resolution
             // rewrites history and rebases descendants.
             let engine = repo.open_engine()?;
-            let roots = engine.conflict_roots()?;
+            let roots = engine.conflict_roots(None)?;
             let targets: Vec<_> = roots
                 .iter()
                 .filter(|root| root.paths.iter().any(|p| p == target_file))

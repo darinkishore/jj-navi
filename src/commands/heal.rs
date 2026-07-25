@@ -13,6 +13,7 @@ use crate::engine::{DivergentChange, DivergentSibling};
 use crate::repo::NaviWorkspace;
 use crate::{Error, Result};
 
+#[allow(clippy::struct_excessive_bools)] // direct CLI flag adapter
 pub struct HealOptions<'a> {
     /// Only heal changes whose id starts with one of these prefixes.
     pub changes: &'a [String],
@@ -22,6 +23,9 @@ pub struct HealOptions<'a> {
     pub apply: bool,
     /// Maximum number of changes healed per run.
     pub limit: usize,
+    /// When the newest sibling is an empty shell, keep the newest
+    /// content-carrying sibling instead of skipping.
+    pub prefer_content: bool,
     /// Emit a machine envelope on stdout.
     pub json: bool,
 }
@@ -60,6 +64,7 @@ struct SkippedChangeJson {
 
 struct PlannedHeal<'a> {
     change: &'a DivergentChange,
+    winner: &'a DivergentSibling,
     losers: Vec<PlannedLoser<'a>>,
 }
 
@@ -76,6 +81,27 @@ struct SkippedHeal<'a> {
     reason: String,
 }
 
+/// Which siblings sit in the landing target's ancestry? Best-effort:
+/// repos without a resolvable target skip the annotation and its guard.
+fn target_ancestry_members(
+    repo: &NaviWorkspace,
+    engine: &crate::engine::Engine,
+    all: &[DivergentChange],
+) -> Option<std::collections::HashSet<String>> {
+    repo.landing_target_head().ok().and_then(|(_, head)| {
+        let ids: Vec<String> = all
+            .iter()
+            .flat_map(|change| {
+                change
+                    .siblings
+                    .iter()
+                    .map(|sibling| sibling.commit_id.clone())
+            })
+            .collect();
+        engine.ancestry_members(&head, &ids).ok()
+    })
+}
+
 struct SelectedHeals<'a> {
     planned: Vec<PlannedHeal<'a>>,
     skipped: Vec<SkippedHeal<'a>>,
@@ -83,11 +109,13 @@ struct SelectedHeals<'a> {
     over_limit: usize,
 }
 
+#[allow(clippy::too_many_lines)] // one linear guard chain per change
 fn select_heals<'a>(
     all: &'a [DivergentChange],
     options: &HealOptions<'_>,
     me: &str,
     engine: &crate::engine::Engine,
+    on_target: Option<&std::collections::HashSet<String>>,
 ) -> SelectedHeals<'a> {
     let mut selected = SelectedHeals {
         planned: Vec::new(),
@@ -118,8 +146,38 @@ fn select_heals<'a>(
             continue;
         }
 
-        // Siblings are sorted newest-op first; the winner is siblings[0].
-        let losers: Vec<&DivergentSibling> = change.siblings.iter().skip(1).collect();
+        // Siblings are sorted newest-op first; the default winner is the
+        // newest. Empty-shell guard: an empty newest sibling (a bare
+        // describe/rebase shell) must not beat a sibling that carries
+        // content — skip, or with --prefer-content keep the newest
+        // content-carrying sibling.
+        let mut winner_index = 0;
+        if change.siblings[0].is_empty
+            && let Some(content_index) = change.siblings.iter().position(|s| !s.is_empty)
+        {
+            if options.prefer_content {
+                winner_index = content_index;
+            } else {
+                selected.skipped.push(SkippedHeal {
+                    change,
+                    reason: format!(
+                        "newest sibling {} is an empty shell while {} carries content; rerun with --prefer-content to keep the content, or resolve manually",
+                        change.siblings[0].commit_id,
+                        change.siblings[content_index].commit_id
+                    ),
+                });
+                continue;
+            }
+        }
+        let winner = &change.siblings[winner_index];
+        let losers: Vec<&DivergentSibling> = change
+            .siblings
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != winner_index)
+            .map(|(_, sibling)| sibling)
+            .collect();
+
         // One-writer law: never rewrite a chain that contains a live
         // working copy — that is how divergence gets minted, not healed.
         if let Some(loser) = losers.iter().find(|loser| loser.blocks_wc) {
@@ -139,11 +197,29 @@ fn select_heals<'a>(
             continue;
         }
 
+        // Mainline guard: never abandon a sibling that sits in the landing
+        // target's ancestry in favor of one that does not — that would
+        // rewrite published history onto a stray.
+        if let Some(on_target) = on_target
+            && !on_target.contains(&winner.commit_id)
+            && let Some(mainline) = losers
+                .iter()
+                .find(|loser| on_target.contains(&loser.commit_id))
+        {
+            selected.skipped.push(SkippedHeal {
+                change,
+                reason: format!(
+                    "sibling {} is in the landing target's ancestry but the newest sibling {} is not; refusing to abandon mainline history (heal manually)",
+                    mainline.commit_id, winner.commit_id
+                ),
+            });
+            continue;
+        }
+
         if selected.planned.len() >= options.limit {
             selected.over_limit += 1;
             continue;
         }
-        let winner = &change.siblings[0];
         let losers = losers
             .into_iter()
             .map(|sibling| PlannedLoser {
@@ -153,7 +229,11 @@ fn select_heals<'a>(
                     .ok(),
             })
             .collect();
-        selected.planned.push(PlannedHeal { change, losers });
+        selected.planned.push(PlannedHeal {
+            change,
+            winner,
+            losers,
+        });
     }
 
     selected
@@ -178,7 +258,15 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
         return Ok(());
     }
 
-    let plan = select_heals(&all, options, engine.operation_username(), &engine);
+    let on_target = target_ancestry_members(&repo, &engine, &all);
+
+    let plan = select_heals(
+        &all,
+        options,
+        engine.operation_username(),
+        &engine,
+        on_target.as_ref(),
+    );
     let SelectedHeals {
         planned,
         skipped,
@@ -205,7 +293,7 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
             // winner (same change, newer version) before abandoning the
             // stale side.
             for heal in &planned {
-                let winner = &heal.change.siblings[0];
+                let winner = heal.winner;
                 for loser in &heal.losers {
                     if loser.sibling.has_children {
                         jj.rebase_children_onto(&loser.sibling.commit_id, &winner.commit_id)?;
@@ -260,7 +348,7 @@ fn emit_heal_envelope(
             .iter()
             .map(|heal| HealedChangeJson {
                 change_id: heal.change.change_id.clone(),
-                keep_commit: heal.change.siblings[0].commit_id.clone(),
+                keep_commit: heal.winner.commit_id.clone(),
                 abandon: heal
                     .losers
                     .iter()
@@ -297,7 +385,7 @@ fn render_plan(
     let verb = if applying { "healing" } else { "would heal" };
     for heal in planned {
         eprintln!("{verb} change {}", heal.change.change_id);
-        eprintln!("  keep    {}", describe_sibling(&heal.change.siblings[0]));
+        eprintln!("  keep    {}", describe_sibling(heal.winner));
         for loser in &heal.losers {
             let role = if loser.sibling.has_children {
                 "abandon (rebasing its descendants onto keep)"
@@ -360,7 +448,8 @@ fn describe_sibling(sibling: &DivergentSibling) -> String {
     } else {
         sibling.description.as_str()
     };
-    format!("{}  {description}  [{provenance}]", sibling.commit_id)
+    let empty = if sibling.is_empty { " (empty)" } else { "" };
+    format!("{}{empty}  {description}  [{provenance}]", sibling.commit_id)
 }
 
 /// Parse and validate the `--limit` flag.

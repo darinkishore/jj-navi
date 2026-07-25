@@ -118,11 +118,19 @@ navi lane land feat-auth -m "auth: add tokens" --close --json
 - `navi heal [--apply]` — divergence healer: newest-op-wins per change,
   stale siblings abandoned, stacked descendants rebased onto the winner.
   The plan shows each loser's content diff vs the keeper ("identical tree
-  to keep" = abandoning loses nothing). Skips anything carrying a live
-  working copy (one-writer law). Flags: `--change <prefix>` (repeatable),
-  `--mine`, `--limit N`.
-- `navi conflicts --json` — conflict *roots* ranked by blast radius; fix
-  roots, descendants re-merge automatically.
+  to keep" = abandoning loses nothing). It refuses the dangerous picks:
+  anything carrying a live working copy (one-writer law), a newest
+  sibling that is an empty shell while an older one carries content
+  (override with `--prefer-content` to keep the content), and abandoning
+  a sibling that sits in the landing target's ancestry in favor of a
+  stray. Flags: `--change <prefix>` (repeatable), `--mine`, `--limit N`,
+  `--prefer-content`.
+- `navi conflicts --json` — conflict *roots* ranked by blast radius, with
+  per-file side counts and, when a landing target is configured, triage:
+  `[BLOCKS TARGET]` roots gate landings; `[stranded]` roots live only in
+  dead branches and are cleanup, not emergencies. `-r <revset>` limits
+  the census to that revset's ancestry (e.g. `-r main`). Fix roots;
+  descendants re-merge automatically.
 - `navi resolve --union <FILE> [--apply]` — structurally union-merge an
   append-only file (changelogs) at every root, looping to fixpoint. A line
   survives once if any side has it (deduped across sides — rebase echoes

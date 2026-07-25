@@ -131,7 +131,9 @@ fn resolve_union_file(
     target_file: &str,
     apply: bool,
 ) -> Result<FileResolveReport> {
-    const MAX_PASSES: usize = 10;
+    // One root resolves per pass (descendant rebases invalidate the other
+    // roots' commit ids), so the cap must exceed any realistic root count.
+    const MAX_PASSES: usize = 100;
 
     // Resolutions rebase descendants, which can include live workspaces'
     // working-copy commits. Snapshot them first so nothing un-snapshotted
@@ -150,82 +152,86 @@ fn resolve_union_file(
     let mut pass = 0;
     let mut resolved: Vec<ResolvedRootJson> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
+    let mut planned: Option<Vec<ResolvedRootJson>> = None;
 
-    loop {
-        pass += 1;
-        // Re-open the engine each pass: every applied resolution rewrites
-        // history and rebases descendants.
-        let engine = repo.open_engine()?;
-        let roots = engine.conflict_roots()?;
-        let targets: Vec<_> = roots
-            .iter()
-            .filter(|root| root.paths.iter().any(|p| p == target_file))
-            .filter(|root| !skipped.iter().any(|s| s == &root.commit_id))
-            .collect();
+    let outcome = (|| -> Result<()> {
+        loop {
+            pass += 1;
+            // Re-open the engine each pass: every applied resolution
+            // rewrites history and rebases descendants.
+            let engine = repo.open_engine()?;
+            let roots = engine.conflict_roots()?;
+            let targets: Vec<_> = roots
+                .iter()
+                .filter(|root| root.paths.iter().any(|p| p == target_file))
+                .filter(|root| !skipped.iter().any(|s| s == &root.commit_id))
+                .collect();
 
-        if targets.is_empty() {
-            break;
-        }
+            if targets.is_empty() {
+                return Ok(());
+            }
 
-        if !apply {
-            render_union_plan(target_file, &targets);
-            return Ok(FileResolveReport {
-                file: target_file.to_owned(),
-                strategy: "union",
-                applied: false,
-                passes: pass,
-                roots: planned_json(&targets),
-                skipped,
-            });
-        }
+            if !apply {
+                render_union_plan(target_file, &targets);
+                planned = Some(planned_json(&targets));
+                return Ok(());
+            }
 
-        if pass > MAX_PASSES {
-            eprintln!("stopped after {MAX_PASSES} passes; rerun to continue");
-            break;
-        }
+            if pass > MAX_PASSES {
+                eprintln!("stopped after {MAX_PASSES} passes; rerun to continue");
+                return Ok(());
+            }
 
-        let mut progressed = false;
-        for root in &targets {
-            if let Some(content) = engine.union_merge_file(&root.commit_id, target_file)? {
-                let prepared = prepared_file_path(target_file)?;
-                std::fs::write(&prepared, &content)?;
-                let result = repo.with_mutation_lock(|| {
-                    repo.main_jj_client().resolve_with_prepared_file(
-                        &root.commit_id,
-                        target_file,
-                        &prepared,
-                    )
-                });
-                let _ = std::fs::remove_file(&prepared);
-                result?;
+            let mut progressed = false;
+            for root in &targets {
+                if let Some(union) = engine.union_merge_file(&root.commit_id, target_file)? {
+                    apply_union(repo, target_file, &root.commit_id, &union)?;
+                    eprintln!(
+                        "resolved '{target_file}' at {} ({}-sided, pass {pass})",
+                        root.commit_id, union.sides
+                    );
+                    resolved.push(ResolvedRootJson {
+                        commit_id: root.commit_id.clone(),
+                        conflicted_descendants: root.conflicted_descendants,
+                        pass,
+                    });
+                    progressed = true;
+                    // History changed; re-census before touching more roots.
+                    break;
+                }
                 eprintln!(
-                    "resolved '{target_file}' at {} (pass {pass})",
+                    "skip {}: '{target_file}' conflict is not union-safe (deleted side, binary, or non-file)",
                     root.commit_id
                 );
-                resolved.push(ResolvedRootJson {
-                    commit_id: root.commit_id.clone(),
-                    conflicted_descendants: root.conflicted_descendants,
-                    pass,
-                });
-                progressed = true;
-                // History changed; re-census before touching more roots.
-                break;
+                skipped.push(root.commit_id.clone());
             }
-            eprintln!(
-                "skip {}: '{target_file}' conflict is not union-safe (deleted side, binary, or non-file)",
-                root.commit_id
-            );
-            skipped.push(root.commit_id.clone());
+            if !progressed {
+                return Ok(());
+            }
         }
-        if !progressed {
-            break;
-        }
-    }
+    })();
 
+    // Recover live workspaces even when the loop failed part-way: an early
+    // error must not strand anyone stale.
     if apply {
         for root in &live_roots {
             NaviWorkspace::recover_stale_at(root);
         }
+    }
+    outcome?;
+
+    if let Some(planned) = planned {
+        return Ok(FileResolveReport {
+            file: target_file.to_owned(),
+            strategy: "union",
+            applied: false,
+            passes: pass,
+            roots: planned,
+            skipped,
+        });
+    }
+
+    if apply {
         eprintln!();
         eprintln!(
             "union-resolved '{target_file}' at {} root(s) across {pass} pass(es)",
@@ -246,6 +252,30 @@ fn resolve_union_file(
         roots: resolved,
         skipped,
     })
+}
+
+/// Apply a union resolution to one conflicted commit. Two-sided conflicts
+/// go through `jj resolve --tool` (cheap); jj refuses more sides there, so
+/// those squash the resolved file down from a scratch sparse workspace.
+fn apply_union(
+    repo: &NaviWorkspace,
+    target_file: &str,
+    commit_id: &str,
+    union: &crate::engine::UnionFileMerge,
+) -> Result<()> {
+    if union.sides > 2 {
+        return repo.with_mutation_lock(|| {
+            repo.resolve_file_via_squash(commit_id, target_file, &union.content)
+        });
+    }
+    let prepared = prepared_file_path(target_file)?;
+    std::fs::write(&prepared, &union.content)?;
+    let result = repo.with_mutation_lock(|| {
+        repo.main_jj_client()
+            .resolve_with_prepared_file(commit_id, target_file, &prepared)
+    });
+    let _ = std::fs::remove_file(&prepared);
+    result
 }
 
 #[derive(serde::Serialize)]

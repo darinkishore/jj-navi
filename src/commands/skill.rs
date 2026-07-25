@@ -121,9 +121,12 @@ navi lane land feat-auth -m "auth: add tokens" --close --json
 - `navi conflicts --json` — conflict *roots* ranked by blast radius; fix
   roots, descendants re-merge automatically.
 - `navi resolve --union <FILE> [--apply]` — structurally union-merge an
-  append-only file (changelogs) at every root, looping to fixpoint. With a
-  `[resolve]` policy table configured, bare `navi resolve --apply` sweeps
-  every policy.
+  append-only file (changelogs) at every root, looping to fixpoint. A line
+  survives once if any side has it (deduped across sides — rebase echoes
+  duplicate entries); works for any number of conflict sides. Expect the
+  conflict count to *rise* mid-run as descendants re-merge, then collapse:
+  that is the fixpoint loop working, not damage. With a `[resolve]` policy
+  table configured, bare `navi resolve --apply` sweeps every policy.
 
 ## Workspace basics (outside the lane workflow)
 

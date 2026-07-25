@@ -579,6 +579,17 @@ impl<'a> JjClient<'a> {
         self.run(&args).map(|_| ())
     }
 
+    /// Squash this workspace's working-copy changes to one file into its
+    /// parent. The working copy has no description, so the parent's message
+    /// is kept and no editor opens.
+    pub(crate) fn squash_file_into_parent(&self, path: &str) -> Result<()> {
+        self.run(&[
+            OsString::from("squash"),
+            OsString::from(fileset_exact_pattern(path)),
+        ])
+        .map(|_| ())
+    }
+
     /// Create a bookmark at a revision.
     pub(crate) fn bookmark_create(&self, bookmark: &str, revision: &str) -> Result<()> {
         self.run(&[

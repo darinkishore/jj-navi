@@ -240,6 +240,50 @@ impl NaviWorkspace {
         Ok(roots)
     }
 
+    /// Write resolved content into a (possibly many-sided) conflicted
+    /// commit by materializing just that file in a throwaway sparse
+    /// workspace, overwriting it, and squashing the fix into the commit.
+    /// This is the standard jj resolution flow, so it works for any number
+    /// of conflict sides — unlike `jj resolve --tool`, which caps at two.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace cannot be created or the squash
+    /// fails. The throwaway workspace is cleaned up on every path.
+    pub(crate) fn resolve_file_via_squash(
+        &self,
+        commit_id: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<()> {
+        let name = WorkspaceName::new("navi-resolve")?;
+        // A crashed prior run can leave the scratch workspace behind.
+        if self.workspace_exists(&name)? {
+            let _ = self.forget_workspace(&name);
+        }
+        let root = self.planned_workspace_root(&name);
+        if root.is_dir() {
+            let _ = fs::remove_dir_all(&root);
+        }
+
+        let jj = JjClient::new(&self.workspace_root);
+        jj.workspace_add_sparse(&name, &root, Some(commit_id), "empty")?;
+        let result = (|| -> Result<()> {
+            let scratch = JjClient::new(&root);
+            scratch.sparse_set(&[path.to_owned()])?;
+            let file_path = root.join(path);
+            if let Some(parent) = file_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&file_path, content)?;
+            scratch.squash_file_into_parent(path)
+        })();
+
+        let _ = self.forget_workspace(&name);
+        let _ = fs::remove_dir_all(&root);
+        result
+    }
+
     /// Best-effort recovery of a stale working copy at `root`.
     pub(crate) fn recover_stale_at(root: &Path) {
         let _ = JjClient::new(root).workspace_update_stale();

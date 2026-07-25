@@ -175,3 +175,75 @@ fn heal_plan_reports_content_diff_and_heals_divergence() {
         "no divergence should remain after heal --apply: {envelope}"
     );
 }
+
+/// A three-parent merge produces a 3-sided conflict, which jj's
+/// `resolve --tool` refuses; navi must route it through the squash path.
+/// The sides share a line, which must survive exactly once (deduped union).
+#[test]
+fn resolve_union_handles_many_sided_conflicts_with_dedup() {
+    let repo = TempJjRepo::new();
+    commit_file(repo.path(), "log.md", "# log\n", "Add log");
+    let base = repo.rev_id("@-");
+
+    let mut entries = Vec::new();
+    for name in ["alpha", "beta", "gamma"] {
+        TempJjRepo::run_at(repo.path(), &["new", &base]);
+        fs::write(
+            repo.path().join("log.md"),
+            format!("# log\n- shared entry\n- {name} entry\n"),
+        )
+        .expect("write side");
+        TempJjRepo::run_at(repo.path(), &["commit", "-m", &format!("{name} entry")]);
+        entries.push(repo.rev_id("@-"));
+    }
+    // Three-parent merge working copy -> 3-sided conflict; park it behind
+    // a child so the conflict root is not @ itself.
+    TempJjRepo::run_at(
+        repo.path(),
+        &["new", &entries[0], &entries[1], &entries[2]],
+    );
+    TempJjRepo::run_at(repo.path(), &["new"]);
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["resolve", "--union", "log.md", "--apply", "--json"],
+    );
+    assert_success(&output, "resolve 3-sided union");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("resolve envelope");
+    assert!(
+        !envelope["result"]["roots"].as_array().expect("roots").is_empty(),
+        "the 3-sided root should be resolved: {envelope}"
+    );
+
+    let output = command_output("navi", repo.path(), &["conflicts", "--json"]);
+    assert_success(&output, "post-resolve census");
+    let census: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("census envelope");
+    assert!(
+        census["result"]["roots"].as_array().expect("roots").is_empty(),
+        "no conflicts should remain: {census}"
+    );
+
+    let resolved = TempJjRepo::run_at(
+        repo.path(),
+        &["--ignore-working-copy", "file", "show", "-r", "@-", "log.md"],
+    );
+    for entry in ["- alpha entry", "- beta entry", "- gamma entry"] {
+        assert!(resolved.contains(entry), "union keeps '{entry}': {resolved}");
+    }
+    assert_eq!(
+        resolved.matches("- shared entry").count(),
+        1,
+        "shared line must survive exactly once: {resolved}"
+    );
+    assert!(!resolved.contains("<<<<<<<"), "no markers: {resolved}");
+
+    // The scratch workspace must not linger.
+    let workspaces = repo.run(&["workspace", "list"]);
+    assert!(
+        !workspaces.contains("navi-resolve"),
+        "scratch workspace cleaned up: {workspaces}"
+    );
+}

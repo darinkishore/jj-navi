@@ -349,6 +349,35 @@ impl Engine {
     }
 }
 
+/// A structurally union-merged file: the resolved bytes plus how many
+/// sides the conflict had (jj's `resolve --tool` can only apply 2-sided
+/// resolutions; more sides need the squash path).
+pub struct UnionFileMerge {
+    /// The union-resolved file content.
+    pub content: Vec<u8>,
+    /// Number of conflict sides after simplification.
+    pub sides: usize,
+}
+
+/// Append the union of every side's lines: side order first-seen, each
+/// non-whitespace line emitted once even when several sides carry it
+/// (rebase echoes duplicate entries across sides). Whitespace-only lines
+/// always pass through so formatting survives.
+fn union_hunk_lines<T: AsRef<[u8]>>(merged: &mut Vec<u8>, sides: impl Iterator<Item = T>) {
+    let mut seen: HashSet<Vec<u8>> = HashSet::new();
+    let mut prior_sides: HashSet<Vec<u8>> = HashSet::new();
+    for side in sides {
+        for line in side.as_ref().split_inclusive(|byte| *byte == b'\n') {
+            let whitespace_only = line.iter().all(u8::is_ascii_whitespace);
+            if whitespace_only || !prior_sides.contains(line) {
+                merged.extend_from_slice(line);
+            }
+            seen.insert(line.to_vec());
+        }
+        prior_sides.extend(seen.drain());
+    }
+}
+
 /// One conflict root: a commit where conflicts begin (its parents are
 /// conflict-free), with the set of conflicted paths.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -475,7 +504,11 @@ impl Engine {
     }
 
     /// Union-merge a conflicted file at `commit_id` (short hex): jj's hunk
-    /// merge with conflicted hunks resolved by concatenating every side.
+    /// merge with conflicted hunks resolved by keeping every side's lines —
+    /// a line survives (once) if any side has it. Rebase-echo conflicts
+    /// carry heavily overlapping sides, so a plain concatenation would
+    /// duplicate entries; the union dedupes non-whitespace lines across
+    /// sides while preserving first-seen order.
     ///
     /// Returns `None` when the path's conflict is not a clean file conflict
     /// (deleted side, binary, non-file terms) and must be handled manually.
@@ -483,7 +516,7 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error on store failures or if the commit/path is unknown.
-    pub fn union_merge_file(&self, commit_id: &str, path: &str) -> Result<Option<Vec<u8>>> {
+    pub fn union_merge_file(&self, commit_id: &str, path: &str) -> Result<Option<UnionFileMerge>> {
         use jj_lib::repo_path::RepoPath;
 
         let id = self.resolve_commit_prefix(commit_id)?;
@@ -504,9 +537,13 @@ impl Engine {
         let Some(file_merge) = value.to_file_merge() else {
             return Ok(None); // non-file terms (directories, symlinks, absent)
         };
+        // Cancel matching add/remove pairs first: rebase echoes often
+        // simplify to fewer sides (or resolve outright).
+        let file_merge = file_merge.simplify();
         if file_merge.iter().any(Option::is_none) {
             return Ok(None); // a side deleted the file; not union material
         }
+        let sides = file_merge.adds().count();
 
         let contents = pollster::block_on(jj_lib::conflicts::extract_as_single_hunk(
             &file_merge,
@@ -531,15 +568,15 @@ impl Engine {
                     if let Some(resolved) = hunk.as_resolved() {
                         merged.extend_from_slice(resolved);
                     } else {
-                        // Union: keep every side's lines, in term order.
-                        for side in hunk.adds() {
-                            merged.extend_from_slice(side);
-                        }
+                        union_hunk_lines(&mut merged, hunk.adds());
                     }
                 }
             }
         }
-        Ok(Some(merged))
+        Ok(Some(UnionFileMerge {
+            content: merged,
+            sides,
+        }))
     }
     fn commits_with_wc_descendant(&self, ids: &[CommitId]) -> Result<HashSet<CommitId>> {
         let repo = self.repo.as_ref();

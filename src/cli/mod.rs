@@ -60,6 +60,12 @@ enum Commands {
 
         #[arg(long, short = 'c', help = "Render compact JSON", requires = "json")]
         compact: bool,
+
+        #[arg(
+            long,
+            help = "Cheap read: skip snapshotting each workspace's working copy first"
+        )]
+        no_snapshot: bool,
     },
     #[command(about = "Inspect repo, workspace, and shell health")]
     Doctor {
@@ -211,6 +217,14 @@ enum LaneCommands {
         #[arg(long, help = "Create the workspace with the full tree", overrides_with = "sparse")]
         full: bool,
 
+        #[arg(
+            long,
+            short = 'r',
+            value_name = "REVSET",
+            help = "Base the lane on this revision instead of the trunk head (stacked lanes)"
+        )]
+        revision: Option<String>,
+
         #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
         json: bool,
     },
@@ -233,6 +247,22 @@ enum LaneCommands {
         #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
         json: bool,
     },
+    #[command(about = "Shrink an open lane's write-set")]
+    Release {
+        #[arg(help = "Lane name", add = completion::workspace_value_completer())]
+        name: String,
+
+        #[arg(
+            long = "path",
+            short = 'p',
+            required = true,
+            help = "Write-set path prefix to release (repeatable)"
+        )]
+        paths: Vec<String>,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
+    },
     #[command(about = "List lanes with live weather: sync, drift, conflicts, scope", visible_alias = "ls")]
     List {
         #[arg(long, short = 'j', help = "Render lanes as JSON")]
@@ -240,6 +270,19 @@ enum LaneCommands {
 
         #[arg(long, short = 'c', help = "Render compact JSON", requires = "json")]
         compact: bool,
+
+        #[arg(
+            long,
+            value_name = "STATE",
+            help = "Only show lanes in this lifecycle: open, closed, abandoned, or all"
+        )]
+        lifecycle: Option<String>,
+
+        #[arg(
+            long,
+            help = "Cheap read: skip snapshotting each lane's working copy first"
+        )]
+        no_snapshot: bool,
     },
     #[command(about = "Rebase lanes onto the current trunk head (all open lanes by default)")]
     Sync {
@@ -262,6 +305,20 @@ enum LaneCommands {
 
         #[arg(long, help = "Skip the configured gate command")]
         no_gate: bool,
+
+        #[arg(
+            long,
+            value_name = "CMD",
+            conflicts_with = "no_gate",
+            help = "Run this gate command instead of the configured one"
+        )]
+        gate: Option<String>,
+
+        #[arg(
+            long,
+            help = "Land even if the lane changed paths outside its write-set"
+        )]
+        allow_unscoped: bool,
 
         #[arg(long, help = "Close and remove the lane after landing")]
         close: bool,
@@ -293,6 +350,12 @@ enum LaneCommands {
         #[arg(long, help = "Apply the plan instead of printing it")]
         apply: bool,
 
+        #[arg(
+            long,
+            help = "Also drop closed and abandoned lane records from the registry"
+        )]
+        prune: bool,
+
         #[arg(long, short = 'y', help = "Skip confirmation when applying")]
         yes: bool,
 
@@ -303,6 +366,11 @@ enum LaneCommands {
 
 #[derive(Subcommand)]
 enum ConfigCommands {
+    #[command(about = "Print the effective repo config and where it lives")]
+    Show {
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
+    },
     #[command(about = "Shell integration commands")]
     #[command(arg_required_else_help = true)]
     Shell {
@@ -404,6 +472,7 @@ fn machine_context(command: &Commands) -> Option<&'static str> {
         Commands::Lane { command } => match command {
             LaneCommands::Open { json: true, .. } => Some("lane open"),
             LaneCommands::Claim { json: true, .. } => Some("lane claim"),
+            LaneCommands::Release { json: true, .. } => Some("lane release"),
             LaneCommands::Sync { json: true, .. } => Some("lane sync"),
             LaneCommands::Land { json: true, .. } => Some("lane land"),
             LaneCommands::Close { json: true, .. } => Some("lane close"),
@@ -427,7 +496,11 @@ fn dispatch(
             revision,
             workspace,
         } => commands::switch::run_switch(path, &workspace, create, revision.as_deref())?,
-        Commands::List { json, compact } => commands::list::run_list(path, json, compact)?,
+        Commands::List {
+            json,
+            compact,
+            no_snapshot,
+        } => commands::list::run_list(path, json, compact, no_snapshot)?,
         Commands::Doctor {
             json,
             compact,
@@ -478,6 +551,7 @@ fn dispatch(
                 allow_overlap,
                 sparse,
                 full,
+                revision,
                 json,
             } => {
                 let sparse = if sparse {
@@ -487,7 +561,15 @@ fn dispatch(
                 } else {
                     None
                 };
-                commands::lane::run_lane_open(path, &name, &paths, allow_overlap, sparse, json)?;
+                commands::lane::run_lane_open(
+                    path,
+                    &name,
+                    &paths,
+                    allow_overlap,
+                    sparse,
+                    revision.as_deref(),
+                    json,
+                )?;
             }
             LaneCommands::Claim {
                 name,
@@ -495,8 +577,22 @@ fn dispatch(
                 allow_overlap,
                 json,
             } => commands::lane::run_lane_claim(path, &name, &paths, allow_overlap, json)?,
-            LaneCommands::List { json, compact } => {
-                commands::lane::run_lane_list(path, json, compact)?;
+            LaneCommands::Release { name, paths, json } => {
+                commands::lane::run_lane_release(path, &name, &paths, json)?;
+            }
+            LaneCommands::List {
+                json,
+                compact,
+                lifecycle,
+                no_snapshot,
+            } => {
+                commands::lane::run_lane_list(
+                    path,
+                    json,
+                    compact,
+                    lifecycle.as_deref(),
+                    no_snapshot,
+                )?;
             }
             LaneCommands::Sync {
                 name,
@@ -507,25 +603,37 @@ fn dispatch(
                 name,
                 message,
                 no_gate,
+                gate,
+                allow_unscoped,
                 close,
                 json,
             } => commands::lane::run_lane_land(
                 path,
                 &name,
-                message.as_deref(),
-                no_gate,
-                close,
+                &commands::lane::LandFlags {
+                    message: message.as_deref(),
+                    no_gate,
+                    gate_override: gate.as_deref(),
+                    allow_unscoped,
+                    close,
+                },
                 json,
             )?,
             LaneCommands::Close { name, json } => commands::lane::run_lane_close(path, &name, json)?,
             LaneCommands::Abandon { name, yes, json } => {
                 commands::lane::run_lane_abandon(path, &name, yes, json)?;
             }
-            LaneCommands::Gc { apply, yes, json } => {
-                commands::lane::run_lane_gc(path, apply, yes, json)?;
+            LaneCommands::Gc {
+                apply,
+                prune,
+                yes,
+                json,
+            } => {
+                commands::lane::run_lane_gc(path, apply, prune, yes, json)?;
             }
         },
         Commands::Config { command } => match command {
+            ConfigCommands::Show { json } => commands::config_show::run_config_show(path, json)?,
             ConfigCommands::Shell { command } => match command {
                 ShellCommands::Init { shell } => {
                     commands::config_shell::run_shell_init(bin_name, shell)?;

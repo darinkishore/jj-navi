@@ -580,7 +580,7 @@ impl<'a> JjClient<'a> {
         self.run(&args).map(|_| ())
     }
 
-    /// Configure sparse patterns for this client's workspace.
+    /// Configure sparse patterns for this client's workspace (additive).
     pub(crate) fn sparse_set(&self, paths: &[String]) -> Result<()> {
         let mut args = vec![OsString::from("sparse"), OsString::from("set")];
         for path in paths {
@@ -588,6 +588,31 @@ impl<'a> JjClient<'a> {
             args.push(OsString::from(path));
         }
         self.run(&args).map(|_| ())
+    }
+
+    /// Replace this workspace's sparse patterns with exactly `paths`.
+    pub(crate) fn sparse_set_exact(&self, paths: &[String]) -> Result<()> {
+        let mut args = vec![
+            OsString::from("sparse"),
+            OsString::from("set"),
+            OsString::from("--clear"),
+        ];
+        for path in paths {
+            args.push(OsString::from("--add"));
+            args.push(OsString::from(path));
+        }
+        self.run(&args).map(|_| ())
+    }
+
+    /// Whether this workspace is sparse (patterns narrower than the root).
+    pub(crate) fn sparse_is_active(&self) -> Result<bool> {
+        let output = self.run(&[OsString::from("sparse"), OsString::from("list")])?;
+        let patterns: Vec<&str> = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        Ok(patterns != ["."])
     }
 
     /// Create a workspace with explicit sparse-pattern handling.

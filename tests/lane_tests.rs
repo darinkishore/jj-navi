@@ -551,3 +551,164 @@ fn repo_flag_targets_a_repo_from_outside_it() {
     assert_eq!(envelope["result"]["name"], "alpha");
     assert!(lane_dir(&repo, "alpha").is_dir());
 }
+
+#[test]
+fn lane_open_with_revision_bases_on_that_revision() {
+    let repo = TempJjRepo::new();
+    let alpha = open_lane(&repo, "alpha", "src");
+    write_lane_file(&alpha, "src/alpha.txt", "alpha work\n");
+    let output = command_output("navi", repo.path(), &["exec", "-w", "alpha", "--", "describe", "-m", "alpha work"]);
+    assert_success(&output, "describe alpha work");
+
+    // Stack beta on alpha's unlanded working-copy commit.
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "open", "beta", "--path", "docs", "-r", "alpha@", "--json"],
+    );
+    assert_success(&output, "lane open beta -r alpha@");
+    let beta = lane_dir(&repo, "beta");
+    assert!(
+        beta.join("src").join("alpha.txt").is_file(),
+        "stacked lane should contain the base lane's unlanded work"
+    );
+}
+
+#[test]
+fn lane_release_shrinks_write_set_and_refuses_emptying() {
+    let repo = TempJjRepo::new();
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "open", "alpha", "--path", "src", "--path", "docs"],
+    );
+    assert_success(&output, "lane open with two paths");
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "release", "alpha", "--path", "docs", "--json"],
+    );
+    assert_success(&output, "lane release docs");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("release envelope");
+    assert_eq!(envelope["result"]["write_set"], serde_json::json!(["src"]));
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "release", "alpha", "--path", "src", "--json"],
+    );
+    assert!(!output.status.success(), "emptying release must fail");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("error envelope");
+    assert_eq!(envelope["code"], "lane-release-would-empty");
+}
+
+#[test]
+fn lane_gc_prune_drops_retired_records() {
+    let repo = TempJjRepo::new();
+    open_lane(&repo, "alpha", "src");
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "abandon", "alpha", "--yes"],
+    );
+    assert_success(&output, "lane abandon alpha");
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "gc", "--prune", "--apply", "-y", "--json"],
+    );
+    assert_success(&output, "lane gc --prune --apply");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("gc envelope");
+    assert_eq!(envelope["result"]["plan"]["prunable_lanes"], serde_json::json!(["alpha"]));
+
+    let registry = fs::read_to_string(
+        repo.path()
+            .join(".jj")
+            .join("repo")
+            .join("navi")
+            .join("lanes.toml"),
+    )
+    .expect("read lane registry");
+    assert!(
+        !registry.contains("name = \"alpha\""),
+        "pruned record should be gone from the registry"
+    );
+}
+
+#[test]
+fn lane_list_lifecycle_filters_rows() {
+    let repo = TempJjRepo::new();
+    open_lane(&repo, "alpha", "src");
+    open_lane(&repo, "beta", "docs");
+    let output = command_output("navi", repo.path(), &["lane", "abandon", "beta", "--yes"]);
+    assert_success(&output, "abandon beta");
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "list", "--lifecycle", "open", "--json", "--no-snapshot"],
+    );
+    assert_success(&output, "lane list --lifecycle open");
+    let payload: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("lane list json");
+    let lanes = payload["lanes"].as_array().expect("lanes array");
+    assert_eq!(lanes.len(), 1);
+    assert_eq!(lanes[0]["name"], "alpha");
+}
+
+#[test]
+fn lane_land_allow_unscoped_and_gate_override() {
+    let repo = TempJjRepo::new();
+    let lane = open_lane(&repo, "alpha", "src");
+    write_lane_file(&lane, "src/alpha.txt", "in scope\n");
+    write_lane_file(&lane, "docs/out.txt", "out of scope\n");
+
+    // Overriding the gate with a failing command must block the landing.
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &[
+            "lane", "land", "alpha", "-m", "alpha work", "--allow-unscoped", "--gate", "false",
+            "--json",
+        ],
+    );
+    assert!(!output.status.success(), "failing gate override must block");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("gate error envelope");
+    assert_eq!(envelope["code"], "gate-failed");
+
+    // Without --allow-unscoped the out-of-scope path blocks the landing.
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "land", "alpha", "-m", "alpha work"],
+    );
+    assert!(!output.status.success(), "unscoped landing must fail");
+    assert!(stderr_of(&output).contains("error[lane-unscoped-changes]"));
+
+    // --allow-unscoped with a passing gate lands everything.
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &[
+            "lane", "land", "alpha", "-m", "alpha work", "--allow-unscoped", "--gate", "true",
+        ],
+    );
+    assert_success(&output, "land --allow-unscoped");
+}
+
+#[test]
+fn config_show_reports_effective_config() {
+    let repo = TempJjRepo::new();
+    let output = command_output("navi", repo.path(), &["config", "show", "--json"]);
+    assert_success(&output, "config show --json");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("config envelope");
+    assert_eq!(envelope["command"], "config show");
+    assert_eq!(envelope["result"]["lane"]["trunk"], "default");
+}

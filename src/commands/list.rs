@@ -15,11 +15,12 @@ use crate::types::{WorkspaceFreshnessStatus, WorkspaceListEntry};
 ///
 /// Returns an error if workspace discovery fails or if `jj workspace list`
 /// fails.
-pub fn run_list(path: &Path, json: bool, compact: bool) -> Result<()> {
+pub fn run_list(path: &Path, json: bool, compact: bool, no_snapshot: bool) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
+    let snapshot = !no_snapshot;
 
     if json {
-        let snapshots = repo.list_fresh_workspace_snapshots()?;
+        let snapshots = repo.list_fresh_workspace_snapshots(snapshot)?;
         println!(
             "{}",
             render_workspace_list_json(repo.workspace_root(), &snapshots, compact)?
@@ -28,7 +29,7 @@ pub fn run_list(path: &Path, json: bool, compact: bool) -> Result<()> {
     }
 
     let spinner = ListSpinner::start();
-    let entries = repo.list_workspaces()?;
+    let entries = repo.list_workspaces(snapshot)?;
     spinner.stop();
 
     print!("{}", render_workspace_table(&entries));

@@ -16,9 +16,9 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::error::{Error, Result};
 use crate::types::{
-    LaneAbandonOutcome, LaneFanoutEntry, LaneGcPlan, LaneLandOutcome, LaneLifecycle,
-    LaneListEntry, LaneOpenOutcome, LanePath, LaneRev, LaneSyncOutcome, WorkspaceName,
-    WorkspacePathState,
+    LaneAbandonOutcome, LaneFanoutEntry, LaneGcPlan, LaneLandOutcome, LaneLandRequest,
+    LaneLifecycle, LaneListEntry, LaneOpenOutcome, LanePath, LaneRev, LaneSyncOutcome,
+    WorkspaceName, WorkspacePathState,
 };
 
 use super::config::{ensure_repo_config, navi_dir_path};
@@ -49,6 +49,7 @@ impl NaviWorkspace {
         paths: Vec<LanePath>,
         allow_overlap: bool,
         sparse: Option<bool>,
+        revision: Option<&str>,
     ) -> Result<LaneOpenOutcome> {
         let config = self.repo_config();
         if *name == config.lane.trunk {
@@ -70,8 +71,14 @@ impl NaviWorkspace {
             check_overlap_excluding(&store, name, &paths)?;
         }
 
-        let trunk = self.resolve_trunk()?;
-        let base = self.rev(&trunk.head_commit)?;
+        // A lane normally bases on the trunk head; `-r` bases it on any
+        // revision instead (stacked lanes, work atop an unlanded chain).
+        let base = if let Some(revision) = revision {
+            self.rev(revision)?
+        } else {
+            let trunk = self.resolve_trunk()?;
+            self.rev(&trunk.head_commit)?
+        };
         let sparse = sparse.unwrap_or(config.lane.sparse);
         let target_root = self.planned_workspace_root(name);
         ensure_repo_config(self.repo_storage_path(), config)?;
@@ -91,7 +98,7 @@ impl NaviWorkspace {
         let jj = JjClient::new(self.workspace_root());
         let patterns = if sparse { "empty" } else { "full" };
         let created = (|| -> Result<()> {
-            jj.workspace_add_sparse(name, &target_root, Some(&trunk.head_commit), patterns)?;
+            jj.workspace_add_sparse(name, &target_root, Some(&base.commit_id), patterns)?;
 
             if sparse {
                 let mut materialize: Vec<String> =
@@ -115,7 +122,7 @@ impl NaviWorkspace {
                 name,
                 &target_root,
                 &config.workspace_template,
-                Some(&trunk.head_commit),
+                Some(&base.commit_id),
             );
             metadata.save()?;
             Ok(())
@@ -189,13 +196,80 @@ impl NaviWorkspace {
         Ok(merged)
     }
 
+    /// Shrink an open lane's write-set. Refuses to empty it: a lane with no
+    /// write-set can land anything, which defeats scoping entirely.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lane is not open or releasing would empty the
+    /// write-set.
+    pub fn lane_release(
+        &self,
+        name: &WorkspaceName,
+        paths: &[LanePath],
+    ) -> Result<Vec<LanePath>> {
+        let _lock = MutationLock::acquire(self.repo_storage_path())?;
+        let mut store = LaneStore::load(self.repo_storage_path())?;
+        emit_store_warnings(&store);
+        let record = require_open_lane(&store, name)?;
+
+        for path in paths {
+            if !record.paths.contains(path) {
+                eprintln!("warning: '{path}' is not in lane '{name}' write-set; ignoring");
+            }
+        }
+        let remaining: Vec<LanePath> = record
+            .paths
+            .iter()
+            .filter(|path| !paths.contains(path))
+            .cloned()
+            .collect();
+        if remaining.is_empty() {
+            return Err(Error::LaneReleaseWouldEmpty {
+                lane: name.as_str().to_owned(),
+            });
+        }
+        if remaining.len() == record.paths.len() {
+            return Ok(remaining);
+        }
+        store.replace_paths(name, remaining.clone())?;
+        store.save()?;
+
+        // Shrink a sparse workspace's materialized tree to match. Exact-set
+        // (not additive) so the released paths actually disappear.
+        if self.workspace_exists(name)? {
+            let lane_root = self.existing_lane_root(name)?;
+            let lane_jj = JjClient::new(&lane_root);
+            if lane_jj.sparse_is_active()? {
+                let config = self.repo_config();
+                let mut materialize: Vec<String> = remaining
+                    .iter()
+                    .map(|path| path.as_str().to_owned())
+                    .collect();
+                materialize.push(String::from(".gitignore"));
+                materialize.extend(
+                    config
+                        .lane
+                        .context_paths
+                        .iter()
+                        .map(|path| path.as_str().to_owned()),
+                );
+                materialize.sort();
+                materialize.dedup();
+                lane_jj.sparse_set_exact(&materialize)?;
+            }
+        }
+
+        Ok(remaining)
+    }
+
     /// Report every registered lane with live sync/scope state from `jj`.
     ///
     /// # Errors
     ///
     /// Returns an error if the registry cannot be read or trunk cannot be
     /// resolved.
-    pub fn lane_list(&self) -> Result<Vec<LaneListEntry>> {
+    pub fn lane_list(&self, snapshot: bool) -> Result<Vec<LaneListEntry>> {
         let store = LaneStore::load(self.repo_storage_path())?;
         emit_store_warnings(&store);
         let trunk = self.resolve_trunk()?;
@@ -225,7 +299,8 @@ impl NaviWorkspace {
                 if entry.workspace_exists {
                     // Snapshot the lane (bounded, best-effort) so weather
                     // reflects on-disk work, not the last time jj ran there.
-                    if let Ok(root) = self.existing_lane_root(&record.name) {
+                    // `--no-snapshot` trades that accuracy for speed.
+                    if snapshot && let Ok(root) = self.existing_lane_root(&record.name) {
                         let _ = super::jj::snapshot_working_copy_at(&root);
                     }
                     let lane_sym = lane_symbol(&record.name);
@@ -290,16 +365,14 @@ impl NaviWorkspace {
     pub fn lane_land(
         &self,
         name: &WorkspaceName,
-        message: Option<&str>,
-        no_gate: bool,
-        close: bool,
+        request: &LaneLandRequest<'_>,
     ) -> Result<LaneLandOutcome> {
         let store = LaneStore::load(self.repo_storage_path())?;
         emit_store_warnings(&store);
         let record = require_open_lane(&store, name)?.clone();
         // Refuse --close upfront: deleting the workspace this command runs
         // in would fail *after* the landing already happened.
-        if close && *self.current_workspace_name() == *name {
+        if request.close && *self.current_workspace_name() == *name {
             return Err(Error::LaneCloseFromInside(name.as_str().to_owned()));
         }
         let lane_root = self.existing_lane_root(name)?;
@@ -312,23 +385,33 @@ impl NaviWorkspace {
         let jj = JjClient::new(self.workspace_root());
         let lane_sym = lane_symbol(name);
 
-        verify_landing_preconditions(&jj, &lane_jj, &trunk_jj, &trunk, &record, &lane_sym)?;
+        verify_landing_preconditions(
+            &jj,
+            &lane_jj,
+            &trunk_jj,
+            &trunk,
+            &record,
+            &lane_sym,
+            request.allow_unscoped,
+        )?;
 
         // Pin the landing head BEFORE the gate runs. `finalize_landing_head`
         // snapshots and parks the work; from here on the landed tree is
         // fixed, so nothing the gate writes (build artifacts, lockfiles)
         // can ride into the landing.
-        let head_commit = Self::finalize_landing_head(&lane_jj, &trunk, name, message)?;
+        let head_commit = Self::finalize_landing_head(&lane_jj, &trunk, name, request.message)?;
 
         // Re-check scope against the pinned head: its snapshot may have
         // picked up files written since the pre-checks above.
-        let changed = jj.changed_paths(&trunk.head_commit, &head_commit)?;
-        let unscoped = unscoped_paths(&changed, &record.paths);
-        if !unscoped.is_empty() {
-            return Err(Error::LaneUnscopedChanges {
-                lane: name.as_str().to_owned(),
-                paths: unscoped.join("\n"),
-            });
+        if !request.allow_unscoped {
+            let changed = jj.changed_paths(&trunk.head_commit, &head_commit)?;
+            let unscoped = unscoped_paths(&changed, &record.paths);
+            if !unscoped.is_empty() {
+                return Err(Error::LaneUnscopedChanges {
+                    lane: name.as_str().to_owned(),
+                    paths: unscoped.join("\n"),
+                });
+            }
         }
 
         let landed_changes = jj.count(&format!(
@@ -336,8 +419,10 @@ impl NaviWorkspace {
             trunk.head_commit
         ))?;
 
-        let gate = if no_gate {
+        let gate = if request.no_gate {
             None
+        } else if let Some(command) = request.gate_override {
+            Some(command.to_owned())
         } else {
             self.repo_config().lane.gate.clone()
         };
@@ -371,7 +456,7 @@ impl NaviWorkspace {
 
         let fanout = self.fan_out(&jj, &store, name, &head_commit);
 
-        let closed = if close {
+        let closed = if request.close {
             self.close_landed_lane(&mut store, name, &head_commit)?;
             true
         } else {
@@ -490,7 +575,7 @@ impl NaviWorkspace {
     /// # Errors
     ///
     /// Returns an error if workspace discovery fails.
-    pub fn lane_gc_plan(&self) -> Result<LaneGcPlan> {
+    pub fn lane_gc_plan(&self, prune: bool) -> Result<LaneGcPlan> {
         let store = LaneStore::load(self.repo_storage_path())?;
         emit_store_warnings(&store);
         let trunk_name = self.repo_config().lane.trunk.clone();
@@ -509,9 +594,18 @@ impl NaviWorkspace {
             }
         }
 
-        for record in store.open_lanes() {
-            if !registered.contains(&record.name) {
-                plan.orphaned_lanes.push(record.name.clone());
+        for record in store.all_lanes() {
+            match record.lifecycle {
+                LaneLifecycle::Open => {
+                    if !registered.contains(&record.name) {
+                        plan.orphaned_lanes.push(record.name.clone());
+                    }
+                }
+                LaneLifecycle::Closed | LaneLifecycle::Abandoned => {
+                    if prune {
+                        plan.prunable_lanes.push(record.name.clone());
+                    }
+                }
             }
         }
 
@@ -530,12 +624,15 @@ impl NaviWorkspace {
             self.forget_workspace(workspace)?;
         }
 
-        if !plan.orphaned_lanes.is_empty() {
+        if !plan.orphaned_lanes.is_empty() || !plan.prunable_lanes.is_empty() {
             let mut store = LaneStore::load(self.repo_storage_path())?;
             emit_store_warnings(&store);
             let now = OffsetDateTime::now_utc();
             for lane in &plan.orphaned_lanes {
                 store.set_lifecycle(lane, LaneLifecycle::Abandoned, now)?;
+            }
+            for lane in &plan.prunable_lanes {
+                store.remove(lane);
             }
             store.save()?;
         }
@@ -898,6 +995,7 @@ fn require_open_lane<'a>(store: &'a LaneStore, name: &WorkspaceName) -> Result<&
 /// All landing refusals happen before any mutation: a rejected landing must
 /// leave no describe/park artifacts behind. The lane working copy's endpoint
 /// diff equals the future landed diff, so scope-check it directly.
+#[allow(clippy::too_many_arguments)] // flat precondition inputs
 fn verify_landing_preconditions(
     jj: &JjClient,
     lane_jj: &JjClient,
@@ -905,6 +1003,7 @@ fn verify_landing_preconditions(
     trunk: &TrunkContext,
     record: &LaneRecord,
     lane_sym: &str,
+    allow_unscoped: bool,
 ) -> Result<()> {
     let name = &record.name;
     if !jj.is_ancestor(&trunk.head_commit, lane_sym)? {
@@ -935,13 +1034,15 @@ fn verify_landing_preconditions(
         }
     }
 
-    let changed = jj.changed_paths(&trunk.head_commit, lane_sym)?;
-    let unscoped = unscoped_paths(&changed, &record.paths);
-    if !unscoped.is_empty() {
-        return Err(Error::LaneUnscopedChanges {
-            lane: name.as_str().to_owned(),
-            paths: unscoped.join("\n"),
-        });
+    if !allow_unscoped {
+        let changed = jj.changed_paths(&trunk.head_commit, lane_sym)?;
+        let unscoped = unscoped_paths(&changed, &record.paths);
+        if !unscoped.is_empty() {
+            return Err(Error::LaneUnscopedChanges {
+                lane: name.as_str().to_owned(),
+                paths: unscoped.join("\n"),
+            });
+        }
     }
 
     // Trunk dirt outside the write-set rides along untouched; dirt inside

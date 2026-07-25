@@ -330,7 +330,7 @@ pub fn render_lane_abandon_outcome(outcome: &LaneAbandonOutcome) -> String {
 /// Render a gc plan, optionally after it was applied.
 #[must_use]
 pub fn render_lane_gc(plan: &LaneGcPlan, applied: bool) -> String {
-    if plan.ghost_workspaces.is_empty() && plan.orphaned_lanes.is_empty() {
+    if plan.is_empty() {
         return String::from("nothing to collect: no ghost workspaces, no orphaned lanes\n");
     }
 
@@ -343,6 +343,10 @@ pub fn render_lane_gc(plan: &LaneGcPlan, applied: bool) -> String {
     let verb = if applied { "abandoned" } else { "would abandon" };
     for lane in &plan.orphaned_lanes {
         writeln!(output, "{verb} orphaned lane '{lane}' (no jj workspace)").expect("write gc lane");
+    }
+    let verb = if applied { "pruned" } else { "would prune" };
+    for lane in &plan.prunable_lanes {
+        writeln!(output, "{verb} retired lane record '{lane}'").expect("write gc prune");
     }
     if !applied {
         writeln!(output, "plan only; rerun with --apply").expect("write gc hint");

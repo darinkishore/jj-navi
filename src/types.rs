@@ -377,6 +377,21 @@ pub struct LaneFanoutEntry {
     pub error: Option<String>,
 }
 
+/// Inputs to `lane land`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LaneLandRequest<'a> {
+    /// Description for the landed head if it has none.
+    pub message: Option<&'a str>,
+    /// Skip the gate entirely.
+    pub no_gate: bool,
+    /// Run this command as the gate instead of the configured one.
+    pub gate_override: Option<&'a str>,
+    /// Land even when the lane diff leaves its declared write-set.
+    pub allow_unscoped: bool,
+    /// Close and remove the lane after landing.
+    pub close: bool,
+}
+
 /// Outcome of `lane land`.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct LaneLandOutcome {
@@ -412,6 +427,18 @@ pub struct LaneGcPlan {
     pub ghost_workspaces: Vec<WorkspaceName>,
     /// Open registry lanes with no corresponding `jj` workspace.
     pub orphaned_lanes: Vec<WorkspaceName>,
+    /// Closed/abandoned registry records selected by `--prune`.
+    pub prunable_lanes: Vec<WorkspaceName>,
+}
+
+impl LaneGcPlan {
+    /// Whether the plan has nothing to do.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ghost_workspaces.is_empty()
+            && self.orphaned_lanes.is_empty()
+            && self.prunable_lanes.is_empty()
+    }
 }
 
 /// Lane workflow configuration stored in the repo config file.
@@ -594,6 +621,15 @@ impl WorkspaceFreshnessSnapshot {
         }
     }
 
+    /// Return a freshness snapshot for a deliberately skipped snapshot.
+    #[must_use]
+    pub fn skipped_no_snapshot() -> Self {
+        Self {
+            status: WorkspaceFreshnessStatus::SkippedNoSnapshot,
+            reason: Some(String::from("snapshot skipped (--no-snapshot)")),
+        }
+    }
+
     /// Return a failed freshness snapshot.
     #[must_use]
     pub fn failed(reason: impl Into<String>) -> Self {
@@ -632,6 +668,8 @@ pub enum WorkspaceFreshnessStatus {
     SkippedStale,
     /// Workspace path is not trusted enough to run JJ in it.
     SkippedUntrusted,
+    /// Snapshotting was deliberately skipped (`--no-snapshot`).
+    SkippedNoSnapshot,
     /// JJ failed while making the workspace current.
     Failed,
     /// JJ exceeded Navi's deadline while making the workspace current.
@@ -647,6 +685,7 @@ impl WorkspaceFreshnessStatus {
             Self::SkippedMissing => "skipped_missing",
             Self::SkippedStale => "skipped_stale",
             Self::SkippedUntrusted => "skipped_untrusted",
+            Self::SkippedNoSnapshot => "skipped_no_snapshot",
             Self::Failed => "failed",
             Self::TimedOut => "timed_out",
         }

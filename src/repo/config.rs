@@ -81,18 +81,35 @@ pub(crate) fn ensure_repo_config(repo_storage_path: &Path, config: &RepoConfig) 
 
     let path = repo_config_path(repo_storage_path);
     if !path.exists() {
-        let file = RepoConfigFile {
-            workspace_template: config.workspace_template.as_str().to_owned(),
-            lane: None,
-        };
-        let contents = toml::to_string_pretty(&file).map_err(|error| Error::InvalidRepoConfig {
-            path: path.clone(),
-            message: error.to_string(),
-        })?;
-        super::storage::save_atomic(&path, &contents)?;
+        super::storage::save_atomic(&path, &render_config_scaffold(config))?;
     }
 
     Ok(path)
+}
+
+/// Initial config file: current effective values plus a commented map of
+/// every knob, so the file documents itself.
+fn render_config_scaffold(config: &RepoConfig) -> String {
+    format!(
+        "# jj-navi repo configuration. Uncomment and edit to change behavior.\n\
+         \n\
+         # Template for planning new workspace directories.\n\
+         workspace_template = {template:?}\n\
+         \n\
+         # [lane]\n\
+         # # Workspace whose working-copy parent is the trunk head that lanes\n\
+         # # sync onto and land into.\n\
+         # trunk = \"default\"\n\
+         # # Gate command run (via sh -c, in the lane workspace) before every\n\
+         # # landing; landing aborts if it fails.\n\
+         # gate = \"cargo test\"\n\
+         # # Create lane workspaces sparse by default (write-set + context\n\
+         # # paths only). Override per lane with --sparse/--full.\n\
+         # sparse = false\n\
+         # # Extra read-only paths materialized into sparse lane workspaces.\n\
+         # context_paths = []\n",
+        template = config.workspace_template.as_str(),
+    )
 }
 
 pub(crate) fn navi_dir_path(repo_storage_path: &Path) -> PathBuf {

@@ -99,6 +99,13 @@ impl NaviWorkspace {
         &self.config
     }
 
+    /// Path where this repo's navi config file lives (whether or not it
+    /// exists yet).
+    #[must_use]
+    pub(crate) fn repo_config_file_path(&self) -> PathBuf {
+        super::config::repo_config_path(&self.repo_storage_path)
+    }
+
     #[must_use]
     pub(crate) fn current_workspace_name(&self) -> &WorkspaceName {
         &self.current_workspace
@@ -343,8 +350,8 @@ impl NaviWorkspace {
     ///
     /// Returns an error if `jj workspace list` fails or if a workspace name is
     /// invalid for navi.
-    pub fn list_workspaces(&self) -> Result<Vec<WorkspaceListEntry>> {
-        let snapshots = self.list_fresh_workspace_snapshots()?;
+    pub fn list_workspaces(&self, snapshot: bool) -> Result<Vec<WorkspaceListEntry>> {
+        let snapshots = self.list_fresh_workspace_snapshots(snapshot)?;
 
         Ok(snapshots
             .iter()
@@ -373,20 +380,24 @@ impl NaviWorkspace {
     ///
     /// Returns an error if `jj workspace list` fails or if a workspace name is
     /// invalid for navi.
-    pub(crate) fn list_fresh_workspace_snapshots(&self) -> Result<Vec<WorkspaceSnapshot>> {
+    pub(crate) fn list_fresh_workspace_snapshots(
+        &self,
+        snapshot: bool,
+    ) -> Result<Vec<WorkspaceSnapshot>> {
         let metadata = WorkspaceMetadataStore::load(&self.repo_storage_path)?;
         let mut snapshots = self.discover_workspace_snapshots_with_metadata(&metadata)?;
         let freshness = snapshots
             .iter()
-            .map(|snapshot| {
-                let freshness = match snapshot.path.state {
+            .map(|entry| {
+                let freshness = match entry.path.state {
+                    _ if !snapshot => WorkspaceFreshnessSnapshot::skipped_no_snapshot(),
                     WorkspacePathState::Confirmed | WorkspacePathState::Inferred => {
-                        super::jj::snapshot_working_copy_at(&snapshot.path.path)
+                        super::jj::snapshot_working_copy_at(&entry.path.path)
                     }
                     WorkspacePathState::Missing => WorkspaceFreshnessSnapshot::skipped_missing(),
                     WorkspacePathState::Stale => WorkspaceFreshnessSnapshot::skipped_stale(),
                 };
-                (snapshot.name.clone(), freshness)
+                (entry.name.clone(), freshness)
             })
             .collect::<BTreeMap<_, _>>();
 

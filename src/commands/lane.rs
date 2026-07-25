@@ -8,7 +8,10 @@ use crate::output::{
     render_lane_list, render_lane_list_json, render_lane_open_outcome, render_lane_sync_outcomes,
 };
 use crate::repo::NaviWorkspace;
-use crate::types::{LanePath, WorkspaceName};
+use crate::types::{LaneLandRequest, LaneLifecycle, LanePath, WorkspaceName};
+
+/// CLI-facing alias for the lane land request.
+pub type LandFlags<'a> = LaneLandRequest<'a>;
 
 /// Run `lane open`.
 ///
@@ -21,12 +24,13 @@ pub fn run_lane_open(
     paths: &[String],
     allow_overlap: bool,
     sparse: Option<bool>,
+    revision: Option<&str>,
     json: bool,
 ) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let name = WorkspaceName::new(name.to_owned())?;
     let paths = parse_lane_paths(paths)?;
-    let outcome = repo.lane_open(&name, paths, allow_overlap, sparse)?;
+    let outcome = repo.lane_open(&name, paths, allow_overlap, sparse, revision)?;
     eprint!("{}", render_lane_open_outcome(&outcome));
     if json {
         println!("{}", render_json_envelope("lane open", &outcome)?);
@@ -78,14 +82,63 @@ pub fn run_lane_claim(
     Ok(())
 }
 
+/// Run `lane release`.
+///
+/// # Errors
+///
+/// Returns an error if the lane is not open or releasing would empty its
+/// write-set.
+pub fn run_lane_release(path: &Path, name: &str, paths: &[String], json: bool) -> Result<()> {
+    let repo = NaviWorkspace::open(path)?;
+    let name = WorkspaceName::new(name.to_owned())?;
+    let paths = parse_lane_paths(paths)?;
+    let remaining = repo.lane_release(&name, &paths)?;
+    eprintln!(
+        "lane '{name}' write-set: {}",
+        remaining
+            .iter()
+            .map(|lane_path| lane_path.as_str().to_owned())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if json {
+        #[derive(serde::Serialize)]
+        struct ReleaseResult<'a> {
+            name: &'a WorkspaceName,
+            write_set: &'a [LanePath],
+        }
+        println!(
+            "{}",
+            render_json_envelope(
+                "lane release",
+                &ReleaseResult {
+                    name: &name,
+                    write_set: &remaining,
+                }
+            )?
+        );
+    }
+    Ok(())
+}
+
 /// Run `lane list`.
 ///
 /// # Errors
 ///
 /// Returns an error if the registry or `jj` state cannot be read.
-pub fn run_lane_list(path: &Path, json: bool, compact: bool) -> Result<()> {
+pub fn run_lane_list(
+    path: &Path,
+    json: bool,
+    compact: bool,
+    lifecycle: Option<&str>,
+    no_snapshot: bool,
+) -> Result<()> {
+    let filter = parse_lifecycle_filter(lifecycle)?;
     let repo = NaviWorkspace::open(path)?;
-    let entries = repo.lane_list()?;
+    let mut entries = repo.lane_list(!no_snapshot)?;
+    if let Some(filter) = filter {
+        entries.retain(|entry| entry.lifecycle == filter);
+    }
     if json {
         println!("{}", render_lane_list_json(&entries, compact)?);
     } else {
@@ -134,14 +187,12 @@ pub fn run_lane_sync(
 pub fn run_lane_land(
     path: &Path,
     name: &str,
-    message: Option<&str>,
-    no_gate: bool,
-    close: bool,
+    request: &LandFlags<'_>,
     json: bool,
 ) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let name = WorkspaceName::new(name.to_owned())?;
-    let outcome = repo.lane_land(&name, message, no_gate, close)?;
+    let outcome = repo.lane_land(&name, request)?;
     eprint!("{}", render_lane_land_outcome(&outcome));
     if json {
         println!("{}", render_json_envelope("lane land", &outcome)?);
@@ -206,16 +257,17 @@ pub fn run_lane_abandon(path: &Path, name: &str, yes: bool, json: bool) -> Resul
 /// # Errors
 ///
 /// Returns an error if discovery, forgetting, or registry saves fail.
-pub fn run_lane_gc(path: &Path, apply: bool, yes: bool, json: bool) -> Result<()> {
+#[allow(clippy::fn_params_excessive_bools)] // direct CLI flag adapter
+pub fn run_lane_gc(path: &Path, apply: bool, prune: bool, yes: bool, json: bool) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
-    let plan = repo.lane_gc_plan()?;
-    let nothing_to_do = plan.ghost_workspaces.is_empty() && plan.orphaned_lanes.is_empty();
-    let applied = if apply && !nothing_to_do {
+    let plan = repo.lane_gc_plan(prune)?;
+    let applied = if apply && !plan.is_empty() {
         if !yes {
             confirm(&format!(
-                "This will forget {} ghost workspace(s) and abandon {} orphaned lane(s).",
+                "This will forget {} ghost workspace(s), abandon {} orphaned lane(s), and prune {} retired record(s).",
                 plan.ghost_workspaces.len(),
-                plan.orphaned_lanes.len()
+                plan.orphaned_lanes.len(),
+                plan.prunable_lanes.len()
             ))?;
         }
         repo.lane_gc_apply(&plan)?;
@@ -239,6 +291,19 @@ pub fn run_lane_gc(path: &Path, apply: bool, yes: bool, json: bool) -> Result<()
         );
     }
     Ok(())
+}
+
+fn parse_lifecycle_filter(value: Option<&str>) -> Result<Option<LaneLifecycle>> {
+    match value {
+        None | Some("all") => Ok(None),
+        Some(value) => LaneLifecycle::parse(value).map(Some).ok_or_else(|| {
+            Error::Engine {
+                message: format!(
+                    "unknown --lifecycle '{value}'; use open, closed, abandoned, or all"
+                ),
+            }
+        }),
+    }
 }
 
 fn parse_lane_paths(paths: &[String]) -> Result<Vec<LanePath>> {

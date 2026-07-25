@@ -435,6 +435,15 @@ pub enum Error {
         command: String,
     },
 
+    /// Releasing these paths would leave the lane with an empty write-set.
+    #[error(
+        "error: releasing would empty lane '{lane}' write-set\nhint: keep at least one path, or retire the lane with navi lane close/abandon"
+    )]
+    LaneReleaseWouldEmpty {
+        /// Lane name.
+        lane: String,
+    },
+
     /// Closing a lane requires it to be fully landed.
     #[error(
         "error: lane '{lane}' still has unlanded work\nhint: land it first, or use navi lane abandon to archive and discard"
@@ -568,6 +577,7 @@ impl Error {
             Self::LaneNeedsMessage(_) => "lane-needs-message",
             Self::LaneUnscopedChanges { .. } => "lane-unscoped-changes",
             Self::LaneGateFailed { .. } => "gate-failed",
+            Self::LaneReleaseWouldEmpty { .. } => "lane-release-would-empty",
             Self::LaneNotLanded { .. } => "lane-not-landed",
             Self::MutationLockTimeout { .. } => "mutation-lock-timeout",
             Self::LaneTrunkMoved { .. } => "trunk-moved",

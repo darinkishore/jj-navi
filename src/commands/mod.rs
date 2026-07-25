@@ -1,4 +1,5 @@
 pub(crate) mod config_shell;
+pub(crate) mod config_show;
 pub(crate) mod doctor;
 pub(crate) mod exec;
 pub(crate) mod heal;

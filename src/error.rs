@@ -484,6 +484,13 @@ pub enum Error {
         workspace: String,
     },
 
+    /// The embedded jj-lib engine failed.
+    #[error("error: jj engine failed\n{message}")]
+    Engine {
+        /// What failed, with the underlying cause.
+        message: String,
+    },
+
     /// An underlying I/O operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

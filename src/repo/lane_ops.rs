@@ -364,8 +364,9 @@ impl NaviWorkspace {
 
         // Reload the registry under the lock: it may have changed while the
         // gate was running.
+        let landed = self.rev(&head_commit)?;
         let mut store = LaneStore::load(self.repo_storage_path())?;
-        store.record_land(name, &head_commit, OffsetDateTime::now_utc())?;
+        store.record_land(name, &head_commit, &landed.change_id, OffsetDateTime::now_utc())?;
         store.save()?;
 
         let fanout = self.fan_out(&jj, &store, name, &head_commit);
@@ -379,7 +380,7 @@ impl NaviWorkspace {
 
         Ok(LaneLandOutcome {
             name: name.clone(),
-            landed: self.rev(&head_commit)?,
+            landed,
             landed_changes,
             gate,
             fanout,

@@ -8,6 +8,7 @@ mod cli;
 mod commands;
 mod completion;
 pub mod diagnostics;
+pub mod engine;
 mod error;
 pub mod output;
 mod repo;

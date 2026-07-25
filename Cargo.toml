@@ -34,6 +34,11 @@ thiserror = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 toml = "0.8"
 serde_json = "1"
+# Pinned exactly: navi and the system jj must move in lockstep (nix does
+# this) — jj-lib has no API stability guarantee across versions.
+jj-lib = "=0.43.0"
+pollster = "0.4"
+futures = "0.3"
 
 [dev-dependencies]
 assert_cmd = "2"

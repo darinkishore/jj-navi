@@ -18,7 +18,11 @@ use super::paths::{
 };
 use super::workspace::{WorkspaceSnapshotInputs, collect_workspace_snapshots};
 
-pub(crate) fn build_doctor_report(path: &Path, command_name: &str) -> Result<DoctorReport> {
+pub(crate) fn build_doctor_report(
+    path: &Path,
+    command_name: &str,
+    deep: bool,
+) -> Result<DoctorReport> {
     let cwd = path.canonicalize()?;
     let workspace_root = find_workspace_root(&cwd)?;
     let repo_storage_path = std::fs::canonicalize(resolve_repo_storage_path(&workspace_root)?)?;
@@ -98,8 +102,207 @@ pub(crate) fn build_doctor_report(path: &Path, command_name: &str) -> Result<Doc
     report
         .findings
         .extend(shell::doctor_findings(command_name)?);
+    if deep {
+        report
+            .findings
+            .extend(collect_deep_findings(&repo.workspace_root, &repo.repo_storage_path));
+    }
     report.sort();
     Ok(report)
+}
+
+/// Deep hygiene findings: divergence, conflicts, orphan heads, op churn,
+/// and merged-then-amended landings. Failures degrade to findings instead
+/// of aborting the report.
+fn deep_finding(
+    severity: DoctorSeverity,
+    code: DoctorFindingCode,
+    message: String,
+    hint: Option<String>,
+) -> DoctorFinding {
+    DoctorFinding {
+        severity,
+        code,
+        scope: DoctorScope::Repo,
+        message,
+        path: None,
+        hint,
+    }
+}
+
+/// Divergence and op-churn findings from the embedded engine.
+fn engine_findings(workspace_root: &Path) -> Vec<DoctorFinding> {
+    let mut findings = Vec::new();
+    match super::jj::config_list_all(workspace_root)
+        .and_then(|config| crate::engine::Engine::open(workspace_root, &config))
+    {
+        Ok(engine) => {
+            match engine.divergent_changes() {
+                Ok(changes) if changes.is_empty() => findings.push(deep_finding(
+                    DoctorSeverity::Info,
+                    DoctorFindingCode::DivergentChanges,
+                    String::from("no divergent changes"),
+                    None,
+                )),
+                Ok(changes) => findings.push(deep_finding(
+                    DoctorSeverity::Warning,
+                    DoctorFindingCode::DivergentChanges,
+                    format!("{} divergent change(s)", changes.len()),
+                    Some(String::from("run: navi heal")),
+                )),
+                Err(error) => findings.push(deep_finding(
+                    DoctorSeverity::Warning,
+                    DoctorFindingCode::DivergentChanges,
+                    format!("could not enumerate divergent changes: {error}"),
+                    None,
+                )),
+            }
+            match engine.op_churn(86_400, 5_000) {
+                Ok(churn) => findings.push(deep_finding(
+                    DoctorSeverity::Info,
+                    DoctorFindingCode::OpChurn,
+                    format!(
+                        "{}{} operation(s) in the last 24h",
+                        churn.recent,
+                        if churn.capped { "+" } else { "" }
+                    ),
+                    None,
+                )),
+                Err(error) => findings.push(deep_finding(
+                    DoctorSeverity::Warning,
+                    DoctorFindingCode::OpChurn,
+                    format!("could not walk the operation log: {error}"),
+                    None,
+                )),
+            }
+        }
+        Err(error) => findings.push(deep_finding(
+            DoctorSeverity::Warning,
+            DoctorFindingCode::DivergentChanges,
+            format!("embedded engine unavailable: {error}"),
+            None,
+        )),
+    }
+    findings
+}
+
+/// Deep hygiene findings from the jj CLI plus the lane registry.
+fn collect_deep_findings(workspace_root: &Path, repo_storage_path: &Path) -> Vec<DoctorFinding> {
+    let mut findings = engine_findings(workspace_root);
+    let jj = JjClient::new(workspace_root);
+
+    match jj.count("conflicts()") {
+        Ok(0) => findings.push(deep_finding(
+            DoctorSeverity::Info,
+            DoctorFindingCode::ConflictedCommits,
+            String::from("no visible conflicted commits"),
+            None,
+        )),
+        Ok(count) => findings.push(deep_finding(
+            DoctorSeverity::Warning,
+            DoctorFindingCode::ConflictedCommits,
+            format!("{count} visible conflicted commit(s)"),
+            Some(String::from(
+                "conflicts in a bookmark's ancestry will block pushing it",
+            )),
+        )),
+        Err(error) => findings.push(deep_finding(
+            DoctorSeverity::Warning,
+            DoctorFindingCode::ConflictedCommits,
+            format!("could not count conflicted commits: {error}"),
+            None,
+        )),
+    }
+
+    match jj.revisions("heads(all()) ~ working_copies() ~ bookmarks()") {
+        Ok(orphans) if orphans.is_empty() => findings.push(deep_finding(
+            DoctorSeverity::Info,
+            DoctorFindingCode::OrphanHeads,
+            String::from("every head is a working copy or bookmarked"),
+            None,
+        )),
+        Ok(orphans) => {
+            let sample: Vec<&str> = orphans
+                .iter()
+                .take(5)
+                .map(|revision| revision.commit_id.as_str())
+                .collect();
+            findings.push(deep_finding(
+                DoctorSeverity::Warning,
+                DoctorFindingCode::OrphanHeads,
+                format!(
+                    "{} orphan head(s): work not owned by any workspace or bookmark",
+                    orphans.len()
+                ),
+                Some(format!("for example: {}", sample.join(", "))),
+            ));
+        }
+        Err(error) => findings.push(deep_finding(
+            DoctorSeverity::Warning,
+            DoctorFindingCode::OrphanHeads,
+            format!("could not inventory heads: {error}"),
+            None,
+        )),
+    }
+
+    findings.extend(merged_then_amended_findings(&jj, repo_storage_path));
+    findings
+}
+
+/// Pinned-landing check: a landed change whose change id now resolves to a
+/// different commit was amended after landing; descendant rebases will smear
+/// conflicts into other people's working copies.
+fn merged_then_amended_findings(
+    jj: &JjClient<'_>,
+    repo_storage_path: &Path,
+) -> Vec<DoctorFinding> {
+    let Ok(store) = super::lane_store::LaneStore::load(repo_storage_path) else {
+        return Vec::new();
+    };
+
+    let mut findings = Vec::new();
+    for record in store.all_lanes() {
+        let Some(land) = &record.last_land else {
+            continue;
+        };
+        let Some(change_id) = &land.change_id else {
+            continue;
+        };
+        let message = match jj.revisions(change_id) {
+            Ok(revisions) => match revisions.as_slice() {
+                [revision] if revision.commit_id == land.head_commit => continue,
+                [revision] => format!(
+                    "lane '{}' landed change {change_id} as {} but it now points at {}",
+                    record.name, land.head_commit, revision.commit_id
+                ),
+                [] => format!(
+                    "lane '{}' landed change {change_id} but it is no longer visible",
+                    record.name
+                ),
+                _ => format!(
+                    "lane '{}' landed change {change_id} which is now divergent",
+                    record.name
+                ),
+            },
+            Err(_) => format!(
+                "lane '{}' landed change {change_id} which no longer resolves cleanly",
+                record.name
+            ),
+        };
+        findings.push(DoctorFinding {
+            severity: DoctorSeverity::Warning,
+            code: DoctorFindingCode::MergedThenAmended,
+            scope: DoctorScope::Workspace {
+                workspace: record.name.as_str().to_owned(),
+            },
+            message,
+            path: None,
+            hint: Some(String::from(
+                "amending after landing smears conflicts into descendants; prefer a follow-up change",
+            )),
+        });
+    }
+    findings
 }
 
 struct DoctorWorkspace {

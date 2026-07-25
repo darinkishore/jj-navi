@@ -138,6 +138,26 @@ pub(crate) fn config_list(path: &Path, name: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Resolve the user's full jj configuration (with defaults) as TOML text,
+/// exactly as their `jj` binary sees it. Used to give the embedded engine
+/// config parity.
+pub(crate) fn config_list_all(path: &Path) -> Result<String> {
+    let args = [
+        OsString::from("config"),
+        OsString::from("list"),
+        OsString::from("--include-defaults"),
+    ];
+    let output = jj_command().args(&args).current_dir(path).output()?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(Error::JjCommandFailed {
+            command: format_command(&args),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        })
+    }
+}
+
 pub(crate) fn snapshot_working_copy_at(path: &Path) -> WorkspaceFreshnessSnapshot {
     let args = [
         OsString::from("--quiet"),
@@ -311,6 +331,18 @@ impl<'a> JjClient<'a> {
 
     pub(crate) fn duplicate(&self, revset: &str) -> Result<JjCommandOutput> {
         self.run_capture(&[OsString::from("duplicate"), OsString::from(revset)])
+    }
+
+    /// Abandon commits by id in a single operation (atomic, `jj op undo`
+    /// reverses the whole batch).
+    pub(crate) fn abandon_commits(&self, commit_ids: &[String]) -> Result<()> {
+        let revset = commit_ids.join(" | ");
+        self.run(&[
+            OsString::from("abandon"),
+            OsString::from("-r"),
+            OsString::from(revset),
+        ])
+        .map(|_| ())
     }
 
     pub(crate) fn rebase_source_onto(&self, source: &str, target: &str) -> Result<JjCommandOutput> {

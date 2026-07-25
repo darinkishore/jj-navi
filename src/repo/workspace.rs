@@ -203,6 +203,34 @@ impl NaviWorkspace {
             .any(|entry| entry.name == *workspace))
     }
 
+    /// A jj client rooted at this workspace.
+    #[must_use]
+    pub(crate) fn main_jj_client(&self) -> JjClient<'_> {
+        JjClient::new(&self.workspace_root)
+    }
+
+    /// Run `operation` while holding the repo mutation lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lock cannot be acquired or `operation` fails.
+    pub(crate) fn with_mutation_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _lock = super::storage::MutationLock::acquire(&self.repo_storage_path)?;
+        operation()
+    }
+
+    /// Open the embedded jj-lib engine against this repo, with config
+    /// resolved by the user's own `jj` binary for exact parity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config cannot be resolved or the engine
+    /// cannot load the repo.
+    pub fn open_engine(&self) -> Result<crate::engine::Engine> {
+        let config = super::jj::config_list_all(&self.workspace_root)?;
+        crate::engine::Engine::open(&self.workspace_root, &config)
+    }
+
     /// Snapshot the set of registered workspace names in one `jj` call.
     ///
     /// Lane operations loop over many lanes; checking existence against this

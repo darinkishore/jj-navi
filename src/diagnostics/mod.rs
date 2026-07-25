@@ -62,6 +62,16 @@ pub enum DoctorFindingCode {
     InvalidShellRcFile,
     /// Shell integration block is not installed.
     ShellIntegrationMissing,
+    /// Divergent changes exist (multiple visible commits per change id).
+    DivergentChanges,
+    /// Conflicted commits are visible in the repo.
+    ConflictedCommits,
+    /// Heads that are neither a workspace working copy nor bookmarked.
+    OrphanHeads,
+    /// Operation-log activity summary.
+    OpChurn,
+    /// A landed change was amended after landing.
+    MergedThenAmended,
 }
 
 /// Diagnostic scope for a doctor finding.

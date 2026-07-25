@@ -1,5 +1,7 @@
 pub(crate) mod config_shell;
 pub(crate) mod doctor;
+pub(crate) mod exec;
+pub(crate) mod heal;
 pub(crate) mod lane;
 pub(crate) mod list;
 pub(crate) mod merge;

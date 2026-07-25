@@ -59,6 +59,48 @@ enum Commands {
 
         #[arg(long, short = 'c', help = "Render compact JSON", requires = "json")]
         compact: bool,
+
+        #[arg(
+            long,
+            help = "Add repo hygiene: divergence, conflicts, orphan heads, op churn, merged-then-amended"
+        )]
+        deep: bool,
+    },
+    #[command(
+        about = "Heal divergent changes: newest-op wins, stale siblings abandoned (plan by default)"
+    )]
+    Heal {
+        #[arg(
+            long = "change",
+            help = "Only heal changes whose id starts with this prefix (repeatable)"
+        )]
+        changes: Vec<String>,
+
+        #[arg(long, help = "Only heal changes minted entirely by my operations")]
+        mine: bool,
+
+        #[arg(long, help = "Apply the plan instead of printing it")]
+        apply: bool,
+
+        #[arg(long, default_value_t = 100, help = "Maximum changes healed per run")]
+        limit: usize,
+    },
+    #[command(about = "Run a raw jj command under navi's umbrella (un-stale first, serialized)")]
+    Exec {
+        #[arg(
+            long,
+            short = 'w',
+            help = "Workspace to run in; defaults to the current workspace",
+            add = completion::workspace_value_completer()
+        )]
+        workspace: Option<String>,
+
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            help = "jj arguments, e.g. navi exec -- status"
+        )]
+        args: Vec<OsString>,
     },
     #[command(
         about = "Forget a non-current workspace and delete its directory",
@@ -281,10 +323,34 @@ fn try_run(
             workspace,
         } => commands::switch::run_switch(&path, &workspace, create, revision.as_deref())?,
         Commands::List { json, compact } => commands::list::run_list(&path, json, compact)?,
-        Commands::Doctor { json, compact } => {
+        Commands::Doctor {
+            json,
+            compact,
+            deep,
+        } => {
             return Ok(commands::doctor::run_doctor(
-                &path, bin_name, json, compact,
+                &path, bin_name, json, compact, deep,
             )?);
+        }
+        Commands::Heal {
+            changes,
+            mine,
+            apply,
+            limit,
+        } => {
+            let limit = commands::heal::validated_limit(limit)?;
+            commands::heal::run_heal(
+                &path,
+                &commands::heal::HealOptions {
+                    changes: &changes,
+                    mine,
+                    apply,
+                    limit,
+                },
+            )?;
+        }
+        Commands::Exec { workspace, args } => {
+            return Ok(commands::exec::run_exec(&path, workspace.as_deref(), &args)?);
         }
         Commands::Remove { yes, workspace } => {
             commands::remove::run_remove(&path, &workspace, yes)?;

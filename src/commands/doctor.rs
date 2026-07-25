@@ -9,8 +9,14 @@ use crate::repo::build_doctor_report;
 ///
 /// # Errors
 ///
-pub fn run_doctor(path: &Path, command_name: &str, json: bool, compact: bool) -> Result<ExitCode> {
-    let report = build_doctor_report(path, command_name)?;
+pub fn run_doctor(
+    path: &Path,
+    command_name: &str,
+    json: bool,
+    compact: bool,
+    deep: bool,
+) -> Result<ExitCode> {
+    let report = build_doctor_report(path, command_name, deep)?;
 
     if json {
         println!("{}", render_doctor_report_json(&report, compact)?);

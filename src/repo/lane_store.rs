@@ -15,6 +15,9 @@ const LANES_FILE: &str = "lanes.toml";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LaneLandRecord {
     pub(crate) head_commit: String,
+    /// Change id of the landed head, pinned so doctor can detect
+    /// merged-then-amended changes.
+    pub(crate) change_id: Option<String>,
     pub(crate) at: OffsetDateTime,
 }
 
@@ -55,6 +58,8 @@ struct LaneRecordFile {
     closed_at: Option<String>,
     #[serde(default)]
     last_land_head: Option<String>,
+    #[serde(default)]
+    last_land_change: Option<String>,
     #[serde(default)]
     last_land_at: Option<String>,
 }
@@ -191,6 +196,7 @@ impl LaneStore {
         &mut self,
         name: &WorkspaceName,
         head_commit: &str,
+        change_id: &str,
         at: OffsetDateTime,
     ) -> Result<()> {
         let record = self
@@ -200,6 +206,7 @@ impl LaneStore {
             .ok_or_else(|| Error::LaneNotFound(name.as_str().to_owned()))?;
         record.last_land = Some(LaneLandRecord {
             head_commit: head_commit.to_owned(),
+            change_id: Some(change_id.to_owned()),
             at,
         });
         Ok(())
@@ -253,6 +260,10 @@ fn serialize_record(record: &LaneRecord, path: &Path) -> Result<LaneRecordFile> 
             .last_land
             .as_ref()
             .map(|land| land.head_commit.clone()),
+        last_land_change: record
+            .last_land
+            .as_ref()
+            .and_then(|land| land.change_id.clone()),
         last_land_at: record
             .last_land
             .as_ref()
@@ -276,6 +287,7 @@ fn parse_record(record: LaneRecordFile, path: &Path) -> Result<LaneRecord> {
     let last_land = match (record.last_land_head, record.last_land_at) {
         (Some(head_commit), Some(at)) => Some(LaneLandRecord {
             head_commit,
+            change_id: record.last_land_change,
             at: parse_time(&at)?,
         }),
         (None, None) => None,

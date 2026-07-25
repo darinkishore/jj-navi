@@ -58,6 +58,10 @@ sts_mods runbook (not yet executed), and the backlog.
 
 ## Shipped surface (phases 3–4 summary)
 
+- `navi skill`: the agent usage guide ships inside the binary (load once
+  per session; works outside any repo). Keep it updated with every
+  feature change — it is the contract agents actually read.
+
 - `--json` envelopes on all mutating verbs + conflicts census; stable error
   codes; global `-R/--repo`.
 - `lane open -r` (stacked lanes), `lane land --gate <cmd>`/`--allow-unscoped`,

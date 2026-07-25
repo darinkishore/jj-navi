@@ -186,6 +186,10 @@ enum Commands {
         #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
         json: bool,
     },
+    #[command(
+        about = "Print the agent usage guide for navi (load once per session)"
+    )]
+    Skill,
     #[command(about = "Shell integration and future config commands")]
     #[command(arg_required_else_help = true)]
     Config {
@@ -653,6 +657,7 @@ fn dispatch(
                 commands::lane::run_lane_gc(path, apply, prune, yes, json)?;
             }
         },
+        Commands::Skill => commands::skill::run_skill(),
         Commands::Config { command } => match command {
             ConfigCommands::Show { json } => commands::config_show::run_config_show(path, json)?,
             ConfigCommands::Shell { command } => match command {

@@ -8,4 +8,5 @@ pub(crate) mod list;
 pub(crate) mod merge;
 pub(crate) mod remove;
 pub(crate) mod resolve;
+pub(crate) mod skill;
 pub(crate) mod switch;

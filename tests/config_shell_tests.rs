@@ -173,3 +173,19 @@ fn config_shell_install_fails_for_non_utf8_rc_file() {
         .assert()
         .failure();
 }
+
+#[test]
+fn skill_prints_agent_guide_outside_any_repo() {
+    let outside = tempfile::tempdir().expect("outside dir");
+    command("navi")
+        .current_dir(outside.path())
+        .arg("skill")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agent skill"))
+        .stdout(predicate::str::contains("ONCE per session"))
+        .stdout(predicate::str::contains("Golden rules"))
+        .stdout(predicate::str::contains("Lanes — the core workflow"))
+        .stdout(predicate::str::contains("Error code → recovery"))
+        .stdout(predicate::str::contains("mutation-lock-timeout"));
+}

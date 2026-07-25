@@ -106,6 +106,16 @@ impl NaviWorkspace {
         super::config::repo_config_path(&self.repo_storage_path)
     }
 
+    /// Write the self-documenting config scaffold, optionally with an
+    /// active `[lane] target` (used by `navi init`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written.
+    pub(crate) fn write_config_scaffold(&self, target: Option<&str>) -> Result<PathBuf> {
+        super::config::write_config_scaffold(&self.repo_storage_path, &self.config, target)
+    }
+
     #[must_use]
     pub(crate) fn current_workspace_name(&self) -> &WorkspaceName {
         &self.current_workspace

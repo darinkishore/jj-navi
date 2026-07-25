@@ -189,3 +189,37 @@ fn skill_prints_agent_guide_outside_any_repo() {
         .stdout(predicate::str::contains("Error code → recovery"))
         .stdout(predicate::str::contains("mutation-lock-timeout"));
 }
+
+#[test]
+fn init_writes_scaffold_and_enables_bookmark_mode() {
+    let repo = common::TempJjRepo::new();
+    std::fs::write(repo.path().join("base.txt"), "base\n").expect("write base");
+    common::TempJjRepo::run_at(repo.path(), &["commit", "-m", "Base commit"]);
+
+    command("navi")
+        .current_dir(repo.path())
+        .args(["init", "--target", "main", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"config_written\": true"))
+        .stdout(predicate::str::contains("\"bookmark_created\": true"));
+
+    let config = std::fs::read_to_string(repo.navi_config_path()).expect("read config");
+    assert!(config.contains("target = \"main\""), "config: {config}");
+
+    // Idempotent: second run refuses to rewrite but succeeds without --target change.
+    command("navi")
+        .current_dir(repo.path())
+        .args(["init", "--target", "main"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("already exists"));
+
+    // Bookmark mode is actually active now.
+    command("navi")
+        .current_dir(repo.path())
+        .args(["config", "show", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"target\": \"main\""));
+}

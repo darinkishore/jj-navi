@@ -61,6 +61,9 @@ sts_mods runbook (not yet executed), and the backlog.
 - `navi skill`: the agent usage guide ships inside the binary (load once
   per session; works outside any repo). Keep it updated with every
   feature change — it is the contract agents actually read.
+- `navi init [--target <bookmark>]`: idempotent repo setup — config
+  scaffold (never rewrites an existing config), `.jj/` gitignore in
+  colocated repos, bookmark-mode enablement with bookmark auto-create.
 
 - `--json` envelopes on all mutating verbs + conflicts census; stable error
   codes; global `-R/--repo`.

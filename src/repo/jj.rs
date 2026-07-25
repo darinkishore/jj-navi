@@ -579,6 +579,18 @@ impl<'a> JjClient<'a> {
         self.run(&args).map(|_| ())
     }
 
+    /// Create a bookmark at a revision.
+    pub(crate) fn bookmark_create(&self, bookmark: &str, revision: &str) -> Result<()> {
+        self.run(&[
+            OsString::from("bookmark"),
+            OsString::from("create"),
+            OsString::from(bookmark),
+            OsString::from("-r"),
+            OsString::from(revision),
+        ])
+        .map(|_| ())
+    }
+
     /// Move a bookmark to a revision. Landing advances are always forward
     /// (the lane is synced onto the target head), so no --allow-backwards.
     pub(crate) fn bookmark_move(&self, bookmark: &str, to: &str) -> Result<()> {

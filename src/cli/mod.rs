@@ -190,6 +190,20 @@ enum Commands {
         about = "Print the agent usage guide for navi (load once per session)"
     )]
     Skill,
+    #[command(
+        about = "Initialize navi in this repo: config scaffold, .jj gitignore, optional bookmark target"
+    )]
+    Init {
+        #[arg(
+            long,
+            value_name = "BOOKMARK",
+            help = "Enable bookmark landings into this bookmark (created at @- if missing)"
+        )]
+        target: Option<String>,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
+    },
     #[command(about = "Shell integration and future config commands")]
     #[command(arg_required_else_help = true)]
     Config {
@@ -482,6 +496,7 @@ fn machine_context(command: &Commands) -> Option<&'static str> {
         Commands::Resolve { json: true, .. } => Some("resolve"),
         Commands::Remove { json: true, .. } => Some("remove"),
         Commands::Merge { json: true, .. } => Some("merge"),
+        Commands::Init { json: true, .. } => Some("init"),
         Commands::Lane { command } => match command {
             LaneCommands::Open { json: true, .. } => Some("lane open"),
             LaneCommands::Claim { json: true, .. } => Some("lane claim"),
@@ -658,6 +673,9 @@ fn dispatch(
             }
         },
         Commands::Skill => commands::skill::run_skill(),
+        Commands::Init { target, json } => {
+            commands::init::run_init(path, target.as_deref(), json)?;
+        }
         Commands::Config { command } => match command {
             ConfigCommands::Show { json } => commands::config_show::run_config_show(path, json)?,
             ConfigCommands::Shell { command } => match command {

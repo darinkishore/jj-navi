@@ -115,21 +115,47 @@ pub(crate) fn ensure_repo_config(repo_storage_path: &Path, config: &RepoConfig) 
 
     let path = repo_config_path(repo_storage_path);
     if !path.exists() {
-        super::storage::save_atomic(&path, &render_config_scaffold(config))?;
+        super::storage::save_atomic(&path, &render_config_scaffold(config, None))?;
     }
 
     Ok(path)
 }
 
+/// Write the commented scaffold explicitly (used by `navi init`), with an
+/// optional uncommented `[lane] target` so bookmark mode is on from day one.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be written.
+pub(crate) fn write_config_scaffold(
+    repo_storage_path: &Path,
+    config: &RepoConfig,
+    target: Option<&str>,
+) -> Result<PathBuf> {
+    let navi_dir = navi_dir_path(repo_storage_path);
+    fs::create_dir_all(&navi_dir)?;
+    let path = repo_config_path(repo_storage_path);
+    super::storage::save_atomic(&path, &render_config_scaffold(config, target))?;
+    Ok(path)
+}
+
 /// Initial config file: current effective values plus a commented map of
 /// every knob, so the file documents itself.
-fn render_config_scaffold(config: &RepoConfig) -> String {
+fn render_config_scaffold(config: &RepoConfig, target: Option<&str>) -> String {
+    let active_lane = target.map_or_else(String::new, |bookmark| {
+        format!(
+            "[lane]\n\
+             target = {bookmark:?}\n\
+             \n"
+        )
+    });
     format!(
         "# jj-navi repo configuration. Uncomment and edit to change behavior.\n\
          \n\
          # Template for planning new workspace directories.\n\
          workspace_template = {template:?}\n\
          \n\
+         {active_lane}\
          # [lane]\n\
          # # Workspace whose working-copy parent is the trunk head that lanes\n\
          # # sync onto and land into (legacy mode; ignored when target is set).\n\

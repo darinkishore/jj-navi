@@ -69,7 +69,10 @@ Two landing modes, set in repo config (`navi config show`):
 ## Session start checklist
 
 1. `navi skill` (once — you are reading it).
-2. `navi config show --json` — landing mode, gate, resolve policies.
+2. `navi config show --json` — landing mode, gate, resolve policies. In a
+   brand-new repo, `navi init [--target main]` first: writes the config
+   scaffold, gitignores `.jj/` in colocated repos, and (with `--target`)
+   turns on bookmark landings, creating the bookmark if needed.
 3. `navi doctor --json` — health; add `--deep` if anything smells off
    (divergence, conflict, orphan-head, target-hygiene census).
 4. `navi lane list --json` — who is working where; pick a free scope.

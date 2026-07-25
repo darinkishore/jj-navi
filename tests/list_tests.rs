@@ -522,7 +522,7 @@ fn orphaned_workspace_reports_recovery_error() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: current directory is no longer a registered jj workspace",
+            "error[orphaned-workspace]: current directory is no longer a registered jj workspace",
         ))
         .stderr(predicate::str::contains(
             "hint: cd into another workspace or recreate this workspace with jj",

@@ -6,7 +6,7 @@ use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::commands;
 use crate::completion;
-use crate::output::render_error_message;
+use crate::output::{render_domain_error, render_error_message, render_json_error};
 use crate::types::ShellKind;
 
 #[derive(Parser)]
@@ -14,6 +14,15 @@ use crate::types::ShellKind;
 #[command(arg_required_else_help = true)]
 #[command(version)]
 struct Cli {
+    #[arg(
+        long = "repo",
+        short = 'R',
+        global = true,
+        value_name = "PATH",
+        help = "Operate on the jj repo containing this path instead of the current directory"
+    )]
+    repo: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -84,9 +93,15 @@ enum Commands {
 
         #[arg(long, default_value_t = 100, help = "Maximum changes healed per run")]
         limit: usize,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
     #[command(about = "Census conflict roots: where conflicts begin, ranked by blast radius")]
-    Conflicts,
+    Conflicts {
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
+    },
     #[command(
         about = "Auto-resolve conflicts structurally; --union keeps both sides of an append-only file"
     )]
@@ -100,6 +115,9 @@ enum Commands {
 
         #[arg(long, help = "Apply the resolutions instead of printing the plan")]
         apply: bool,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
     #[command(about = "Run a raw jj command under navi's umbrella (un-stale first, serialized)")]
     Exec {
@@ -126,6 +144,9 @@ enum Commands {
         #[arg(long, short = 'y', help = "Skip destructive confirmation")]
         yes: bool,
 
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
+
         #[arg(help = "Workspace name to remove", add = completion::workspace_value_completer())]
         workspace: String,
     },
@@ -146,6 +167,9 @@ enum Commands {
             add = completion::workspace_value_completer()
         )]
         into: Option<String>,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
     #[command(about = "Shell integration and future config commands")]
     #[command(arg_required_else_help = true)]
@@ -186,6 +210,9 @@ enum LaneCommands {
 
         #[arg(long, help = "Create the workspace with the full tree", overrides_with = "sparse")]
         full: bool,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
     #[command(about = "Extend an open lane's write-set")]
     Claim {
@@ -202,6 +229,9 @@ enum LaneCommands {
 
         #[arg(long, help = "Allow write-set overlap with another open lane")]
         allow_overlap: bool,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
     #[command(about = "List lanes with live weather: sync, drift, conflicts, scope", visible_alias = "ls")]
     List {
@@ -218,6 +248,9 @@ enum LaneCommands {
 
         #[arg(long, help = "Restore out-of-scope paths from the trunk head")]
         drop_unscoped: bool,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
     #[command(about = "Land a lane: gate, fast-forward trunk, ripple the new head to peers")]
     Land {
@@ -232,11 +265,17 @@ enum LaneCommands {
 
         #[arg(long, help = "Close and remove the lane after landing")]
         close: bool,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
     #[command(about = "Close a fully landed lane and remove its workspace")]
     Close {
         #[arg(help = "Lane name", add = completion::workspace_value_completer())]
         name: String,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
     #[command(about = "Abandon a lane: archive its diff, then remove workspace and registration")]
     Abandon {
@@ -245,6 +284,9 @@ enum LaneCommands {
 
         #[arg(long, short = 'y', help = "Skip destructive confirmation")]
         yes: bool,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
     #[command(about = "Collect ghost workspaces (directory gone) and orphaned lane records")]
     Gc {
@@ -253,6 +295,9 @@ enum LaneCommands {
 
         #[arg(long, short = 'y', help = "Skip confirmation when applying")]
         yes: bool,
+
+        #[arg(long, short = 'j', help = "Emit a machine envelope on stdout")]
+        json: bool,
     },
 }
 
@@ -319,65 +364,112 @@ pub fn run(bin_name: &'static str, args: impl IntoIterator<Item = OsString>) -> 
             ExitCode::from(u8::try_from(exit_code).unwrap_or(1))
         }
         Err(CliError::Domain(error)) => {
-            eprintln!("{}", render_error_message(&error.to_string()));
+            eprintln!("{}", render_domain_error(&error));
             ExitCode::FAILURE
         }
     }
 }
 
-#[allow(clippy::too_many_lines)] // flat subcommand dispatcher
 fn try_run(
     bin_name: &'static str,
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<ExitCode, CliError> {
     let cli = parse(bin_name, args)?;
-    let path = PathBuf::from(".");
+    let path = cli.repo.clone().unwrap_or_else(|| PathBuf::from("."));
+    let machine = machine_context(&cli.command);
 
-    match cli.command {
+    match dispatch(cli.command, &path, bin_name) {
+        Ok(exit_code) => Ok(exit_code),
+        Err(error) => {
+            // With --json, errors are part of the machine interface: the
+            // envelope goes to stdout, the human rendering to stderr.
+            if let Some(command) = machine {
+                println!("{}", render_json_error(command, &error));
+                eprintln!("{}", render_domain_error(&error));
+                return Ok(ExitCode::FAILURE);
+            }
+            Err(CliError::Domain(error))
+        }
+    }
+}
+
+/// The command label for the machine envelope when `--json` was requested.
+fn machine_context(command: &Commands) -> Option<&'static str> {
+    match command {
+        Commands::Heal { json: true, .. } => Some("heal"),
+        Commands::Conflicts { json: true } => Some("conflicts"),
+        Commands::Resolve { json: true, .. } => Some("resolve"),
+        Commands::Remove { json: true, .. } => Some("remove"),
+        Commands::Merge { json: true, .. } => Some("merge"),
+        Commands::Lane { command } => match command {
+            LaneCommands::Open { json: true, .. } => Some("lane open"),
+            LaneCommands::Claim { json: true, .. } => Some("lane claim"),
+            LaneCommands::Sync { json: true, .. } => Some("lane sync"),
+            LaneCommands::Land { json: true, .. } => Some("lane land"),
+            LaneCommands::Close { json: true, .. } => Some("lane close"),
+            LaneCommands::Abandon { json: true, .. } => Some("lane abandon"),
+            LaneCommands::Gc { json: true, .. } => Some("lane gc"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // flat subcommand dispatcher
+fn dispatch(
+    command: Commands,
+    path: &std::path::Path,
+    bin_name: &'static str,
+) -> crate::Result<ExitCode> {
+    match command {
         Commands::Switch {
             create,
             revision,
             workspace,
-        } => commands::switch::run_switch(&path, &workspace, create, revision.as_deref())?,
-        Commands::List { json, compact } => commands::list::run_list(&path, json, compact)?,
+        } => commands::switch::run_switch(path, &workspace, create, revision.as_deref())?,
+        Commands::List { json, compact } => commands::list::run_list(path, json, compact)?,
         Commands::Doctor {
             json,
             compact,
             deep,
         } => {
-            return Ok(commands::doctor::run_doctor(
-                &path, bin_name, json, compact, deep,
-            )?);
+            return commands::doctor::run_doctor(path, bin_name, json, compact, deep);
         }
         Commands::Heal {
             changes,
             mine,
             apply,
             limit,
+            json,
         } => {
             let limit = commands::heal::validated_limit(limit)?;
             commands::heal::run_heal(
-                &path,
+                path,
                 &commands::heal::HealOptions {
                     changes: &changes,
                     mine,
                     apply,
                     limit,
+                    json,
                 },
             )?;
         }
-        Commands::Conflicts => commands::resolve::run_conflicts(&path)?,
-        Commands::Resolve { union, apply } => {
-            commands::resolve::run_resolve_union(&path, &union, apply)?;
+        Commands::Conflicts { json } => commands::resolve::run_conflicts(path, json)?,
+        Commands::Resolve { union, apply, json } => {
+            commands::resolve::run_resolve_union(path, &union, apply, json)?;
         }
         Commands::Exec { workspace, args } => {
-            return Ok(commands::exec::run_exec(&path, workspace.as_deref(), &args)?);
+            return commands::exec::run_exec(path, workspace.as_deref(), &args);
         }
-        Commands::Remove { yes, workspace } => {
-            commands::remove::run_remove(&path, &workspace, yes)?;
+        Commands::Remove {
+            yes,
+            json,
+            workspace,
+        } => {
+            commands::remove::run_remove(path, &workspace, yes, json)?;
         }
-        Commands::Merge { from, into } => {
-            commands::merge::run_merge(&path, &from, into.as_deref())?;
+        Commands::Merge { from, into, json } => {
+            commands::merge::run_merge(path, &from, into.as_deref(), json)?;
         }
         Commands::Lane { command } => match command {
             LaneCommands::Open {
@@ -386,6 +478,7 @@ fn try_run(
                 allow_overlap,
                 sparse,
                 full,
+                json,
             } => {
                 let sparse = if sparse {
                     Some(true)
@@ -394,31 +487,43 @@ fn try_run(
                 } else {
                     None
                 };
-                commands::lane::run_lane_open(&path, &name, &paths, allow_overlap, sparse)?;
+                commands::lane::run_lane_open(path, &name, &paths, allow_overlap, sparse, json)?;
             }
             LaneCommands::Claim {
                 name,
                 paths,
                 allow_overlap,
-            } => commands::lane::run_lane_claim(&path, &name, &paths, allow_overlap)?,
+                json,
+            } => commands::lane::run_lane_claim(path, &name, &paths, allow_overlap, json)?,
             LaneCommands::List { json, compact } => {
-                commands::lane::run_lane_list(&path, json, compact)?;
+                commands::lane::run_lane_list(path, json, compact)?;
             }
             LaneCommands::Sync {
                 name,
                 drop_unscoped,
-            } => commands::lane::run_lane_sync(&path, name.as_deref(), drop_unscoped)?,
+                json,
+            } => commands::lane::run_lane_sync(path, name.as_deref(), drop_unscoped, json)?,
             LaneCommands::Land {
                 name,
                 message,
                 no_gate,
                 close,
-            } => commands::lane::run_lane_land(&path, &name, message.as_deref(), no_gate, close)?,
-            LaneCommands::Close { name } => commands::lane::run_lane_close(&path, &name)?,
-            LaneCommands::Abandon { name, yes } => {
-                commands::lane::run_lane_abandon(&path, &name, yes)?;
+                json,
+            } => commands::lane::run_lane_land(
+                path,
+                &name,
+                message.as_deref(),
+                no_gate,
+                close,
+                json,
+            )?,
+            LaneCommands::Close { name, json } => commands::lane::run_lane_close(path, &name, json)?,
+            LaneCommands::Abandon { name, yes, json } => {
+                commands::lane::run_lane_abandon(path, &name, yes, json)?;
             }
-            LaneCommands::Gc { apply, yes } => commands::lane::run_lane_gc(&path, apply, yes)?,
+            LaneCommands::Gc { apply, yes, json } => {
+                commands::lane::run_lane_gc(path, apply, yes, json)?;
+            }
         },
         Commands::Config { command } => match command {
             ConfigCommands::Shell { command } => match command {

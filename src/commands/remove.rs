@@ -13,7 +13,7 @@ use crate::types::WorkspaceName;
 ///
 /// Returns an error if workspace validation, discovery, confirmation,
 /// `jj workspace forget`, or directory deletion fails.
-pub fn run_remove(path: &Path, workspace: &str, yes: bool) -> Result<()> {
+pub fn run_remove(path: &Path, workspace: &str, yes: bool, json: bool) -> Result<()> {
     let workspace = WorkspaceName::new(workspace.to_owned())?;
     let repo = NaviWorkspace::open(path)?;
     let target_root = repo.resolve_removable_workspace_path(&workspace)?;
@@ -39,28 +39,49 @@ pub fn run_remove(path: &Path, workspace: &str, yes: bool) -> Result<()> {
 
     println!("forgot workspace '{removed}'");
     println!("deleted workspace directory '{}'", target_root.display());
-    if let Some(archive) = archive {
+    if let Some(archive) = &archive {
         println!("archived working-copy diff to '{}'", archive.display());
+    }
+    if json {
+        #[derive(serde::Serialize)]
+        struct RemoveResult<'a> {
+            workspace: &'a WorkspaceName,
+            removed_directory: &'a Path,
+            archive: Option<&'a Path>,
+        }
+        println!(
+            "{}",
+            crate::output::render_json_envelope(
+                "remove",
+                &RemoveResult {
+                    workspace: &removed,
+                    removed_directory: &target_root,
+                    archive: archive.as_deref(),
+                }
+            )?
+        );
     }
     Ok(())
 }
 
+/// Interactive destructive-action confirmation. The prompt goes to stderr:
+/// stdout is reserved for machine output.
 fn confirm_remove(
     workspace: &WorkspaceName,
     target_root: &Path,
     archive: Option<&Path>,
 ) -> Result<()> {
-    println!(
+    eprintln!(
         "This will permanently remove workspace '{}'.",
         workspace.as_str()
     );
-    println!("Directory to delete: {}", target_root.display());
+    eprintln!("Directory to delete: {}", target_root.display());
     match archive {
-        Some(archive) => println!("Unlanded changes archived to: {}", archive.display()),
-        None => println!("The workspace has no working-copy changes."),
+        Some(archive) => eprintln!("Unlanded changes archived to: {}", archive.display()),
+        None => eprintln!("The workspace has no working-copy changes."),
     }
-    print!("Type 'yes' to continue: ");
-    io::stdout().flush()?;
+    eprint!("Type 'yes' to continue: ");
+    io::stderr().flush()?;
 
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;

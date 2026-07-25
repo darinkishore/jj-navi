@@ -496,5 +496,88 @@ pub enum Error {
     Io(#[from] std::io::Error),
 }
 
+impl Error {
+    /// Stable machine-readable error code for this variant.
+    ///
+    /// Codes are part of navi's machine interface: they render as
+    /// `error[<code>]:` on stderr and as the `code` field of `--json` error
+    /// envelopes. Renaming one is a breaking change for agent callers.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NotInWorkspace => "not-in-workspace",
+            Self::InvalidWorkspaceName(_) => "invalid-workspace-name",
+            Self::OrphanedWorkspace => "orphaned-workspace",
+            Self::RepoName => "repo-name-unresolved",
+            Self::WorkspaceRootHasNoParent(_) => "workspace-root-has-no-parent",
+            Self::WorkspaceDoesNotExist => "workspace-does-not-exist",
+            Self::WorkspaceNotFound(_) => "workspace-not-found",
+            Self::WorkspaceDirectoryUnavailable { .. } => "workspace-directory-unavailable",
+            Self::CannotRemoveCurrentWorkspace => "cannot-remove-current-workspace",
+            Self::CannotRemoveWorkspaceWithSharedRepoStorage { .. } => {
+                "cannot-remove-shared-repo-storage"
+            }
+            Self::RemoveCancelled => "remove-cancelled",
+            Self::MergeSameWorkspace(_) => "merge-same-workspace",
+            Self::MergeWorkspaceMissing { .. } => "merge-workspace-missing",
+            Self::MergeWorkspaceAmbiguous { .. } => "merge-workspace-ambiguous",
+            Self::MergeWorkspaceUnavailable { .. } => "merge-workspace-unavailable",
+            Self::MergeSourceEmpty { .. } => "merge-source-empty",
+            Self::MergeSourceMultipleRoots { .. } => "merge-source-multiple-roots",
+            Self::MergeSourceMultipleHeads { .. } => "merge-source-multiple-heads",
+            Self::MergeDuplicateRootUnknown { .. } => "merge-duplicate-root-unknown",
+            Self::MergeDuplicateHeadUnknown { .. } => "merge-duplicate-head-unknown",
+            Self::MergeRebaseFailed { .. } => "merge-rebase-failed",
+            Self::WorkspaceDirectoryDeleteAfterForgetFailed { .. } => {
+                "workspace-directory-delete-failed"
+            }
+            Self::InvalidRepoPointer(_) => "invalid-repo-pointer",
+            Self::RepoPointerResolution { .. } => "repo-pointer-resolution",
+            Self::InvalidWorkspaceTemplate(_) => "invalid-workspace-template",
+            Self::InvalidRepoConfig { .. } => "invalid-repo-config",
+            Self::InvalidRepoState { .. } => "invalid-repo-state",
+            Self::NoPreviousWorkspace => "no-previous-workspace",
+            Self::PreviousWorkspaceNotFound(_) => "previous-workspace-not-found",
+            Self::PrimaryWorkspaceUnavailable => "primary-workspace-unavailable",
+            Self::ReservedSwitchTarget(_) => "reserved-switch-target",
+            Self::InvalidWorkspaceMetadata { .. } => "invalid-workspace-metadata",
+            Self::InvalidJjWorkspaceListEntry(_) => "invalid-jj-workspace-list-entry",
+            Self::UnsupportedShell(_) => "unsupported-shell",
+            Self::ShellRequired => "shell-required",
+            Self::ShellDetection => "shell-detection",
+            Self::HomeDirectory => "home-directory-unset",
+            Self::InvalidShellRcFile { .. } => "invalid-shell-rc-file",
+            Self::ShellDirectivePathNotUtf8 => "shell-directive-path-not-utf8",
+            Self::JjCommandFailed { .. } => "jj-command-failed",
+            Self::UnsupportedJjVersion { .. } => "unsupported-jj-version",
+            Self::JsonSerialization(_) => "json-serialization",
+            Self::InvalidLanePath(_) => "invalid-lane-path",
+            Self::InvalidLaneRegistry { .. } => "invalid-lane-registry",
+            Self::LaneExists(_) => "lane-exists",
+            Self::LaneNotFound(_) => "lane-not-found",
+            Self::LaneNotOpen { .. } => "lane-not-open",
+            Self::LaneNameReserved(_) => "lane-name-reserved",
+            Self::LaneOverlap { .. } => "lane-overlap",
+            Self::LaneTrunkMissing(_) => "trunk-missing",
+            Self::LaneTrunkNotReady { .. } => "trunk-not-ready",
+            Self::LaneTrunkDirtyInScope { .. } => "trunk-dirty-in-scope",
+            Self::LaneWorkspaceMissing(_) => "lane-workspace-missing",
+            Self::LaneNotSynced { .. } => "lane-not-synced",
+            Self::LaneConflicted { .. } => "lane-conflicted",
+            Self::LaneNothingToLand(_) => "lane-nothing-to-land",
+            Self::LaneNeedsMessage(_) => "lane-needs-message",
+            Self::LaneUnscopedChanges { .. } => "lane-unscoped-changes",
+            Self::LaneGateFailed { .. } => "gate-failed",
+            Self::LaneNotLanded { .. } => "lane-not-landed",
+            Self::MutationLockTimeout { .. } => "mutation-lock-timeout",
+            Self::LaneTrunkMoved { .. } => "trunk-moved",
+            Self::LaneCloseFromInside(_) => "lane-close-from-inside",
+            Self::WorkspaceExistsWithRevision { .. } => "workspace-exists-with-revision",
+            Self::Engine { .. } => "engine",
+            Self::Io(_) => "io",
+        }
+    }
+}
+
 /// Crate-wide result alias.
 pub type Result<T> = std::result::Result<T, Error>;

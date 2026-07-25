@@ -79,7 +79,7 @@ fn merge_preview_resolves_explicit_target_workspace() {
 }
 
 #[test]
-fn merge_preview_rejects_json_flag() {
+fn merge_json_errors_emit_machine_envelope_on_stdout() {
     let repo = TempJjRepo::new();
     repo.create_workspace("feature-a");
 
@@ -88,7 +88,9 @@ fn merge_preview_rejects_json_flag() {
         .args(["merge", "--from", "feature-a", "--json"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("unexpected argument '--json'"));
+        .stdout(predicate::str::contains("\"ok\": false"))
+        .stdout(predicate::str::contains("\"code\": \"merge-source-empty\""))
+        .stderr(predicate::str::contains("error[merge-source-empty]:"));
 }
 
 #[test]
@@ -101,7 +103,7 @@ fn merge_preview_fails_for_missing_source_workspace() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: merge source workspace 'missing' does not exist",
+            "error[merge-workspace-missing]: merge source workspace 'missing' does not exist",
         ));
 }
 
@@ -116,7 +118,7 @@ fn merge_preview_fails_for_missing_target_workspace() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: merge target workspace 'missing' does not exist",
+            "error[merge-workspace-missing]: merge target workspace 'missing' does not exist",
         ));
 }
 
@@ -130,7 +132,7 @@ fn merge_preview_fails_for_same_source_and_target() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: cannot merge workspace 'default' into itself",
+            "error[merge-same-workspace]: cannot merge workspace 'default' into itself",
         ));
 }
 
@@ -154,7 +156,7 @@ fn merge_preview_refuses_stale_source_workspace_path() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: merge source workspace 'feature-a' is not ready: workspace path is stale",
+            "error[merge-workspace-unavailable]: merge source workspace 'feature-a' is not ready: workspace path is stale",
         ));
 }
 
@@ -179,7 +181,7 @@ fn merge_preview_refuses_stale_target_workspace_path() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: merge target workspace 'integration' is not ready: workspace path is stale",
+            "error[merge-workspace-unavailable]: merge target workspace 'integration' is not ready: workspace path is stale",
         ));
 }
 
@@ -241,7 +243,7 @@ fn merge_preview_reports_rebase_conflict_with_recovery_hint() {
         .failure()
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains(
-            "error: merge stopped during rebase",
+            "error[merge-rebase-failed]: merge stopped during rebase",
         ))
         .stderr(predicate::str::contains(
             "duplicated work remains in the repo and source workspace was not rewritten",

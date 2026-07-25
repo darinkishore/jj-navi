@@ -533,7 +533,6 @@ impl NaviWorkspace {
         if !plan.orphaned_lanes.is_empty() {
             let mut store = LaneStore::load(self.repo_storage_path())?;
             emit_store_warnings(&store);
-        emit_store_warnings(&store);
             let now = OffsetDateTime::now_utc();
             for lane in &plan.orphaned_lanes {
                 store.set_lifecycle(lane, LaneLifecycle::Abandoned, now)?;

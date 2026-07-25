@@ -47,6 +47,12 @@ impl fmt::Display for WorkspaceName {
     }
 }
 
+impl serde::Serialize for WorkspaceName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 /// Validated workspace path template.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceTemplate(String);
@@ -243,6 +249,12 @@ impl fmt::Display for LanePath {
     }
 }
 
+impl serde::Serialize for LanePath {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 /// Durable lifecycle state of a lane. Live facts (sync, conflicts, scope
 /// drift) are always derived from `jj`; only lifecycle transitions persist.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -278,8 +290,14 @@ impl LaneLifecycle {
     }
 }
 
+impl serde::Serialize for LaneLifecycle {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// A revision reference reported by lane operations.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct LaneRev {
     /// Commit id (short form).
     pub commit_id: String,
@@ -290,7 +308,7 @@ pub struct LaneRev {
 }
 
 /// Outcome of `lane open`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct LaneOpenOutcome {
     /// Lane name.
     pub name: WorkspaceName,
@@ -330,7 +348,7 @@ pub struct LaneListEntry {
 }
 
 /// Outcome of syncing one lane.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct LaneSyncOutcome {
     /// Lane name.
     pub name: WorkspaceName,
@@ -347,7 +365,7 @@ pub struct LaneSyncOutcome {
 }
 
 /// Fan-out result for one peer lane after a landing.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct LaneFanoutEntry {
     /// Peer lane name.
     pub name: WorkspaceName,
@@ -360,7 +378,7 @@ pub struct LaneFanoutEntry {
 }
 
 /// Outcome of `lane land`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct LaneLandOutcome {
     /// Lane name.
     pub name: WorkspaceName,
@@ -377,7 +395,7 @@ pub struct LaneLandOutcome {
 }
 
 /// Outcome of `lane abandon`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct LaneAbandonOutcome {
     /// Lane name.
     pub name: WorkspaceName,
@@ -388,7 +406,7 @@ pub struct LaneAbandonOutcome {
 }
 
 /// Garbage-collection plan for ghost workspaces and orphaned lanes.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct LaneGcPlan {
     /// Workspaces registered in `jj` whose directories are gone.
     pub ghost_workspaces: Vec<WorkspaceName>,

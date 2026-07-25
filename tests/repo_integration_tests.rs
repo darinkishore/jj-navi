@@ -20,7 +20,7 @@ fn repo_commands_fail_fast_on_unsupported_jj_version() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: jj 0.39.0 or newer required",
+            "error[unsupported-jj-version]: jj 0.39.0 or newer required",
         ))
         .stderr(predicate::str::contains("hint: found jj 0.38.0"));
 }
@@ -68,7 +68,7 @@ fn repo_commands_fail_for_unparseable_jj_version() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: jj 0.39.0 or newer required",
+            "error[unsupported-jj-version]: jj 0.39.0 or newer required",
         ))
         .stderr(predicate::str::contains("hint: found jj dev build"));
 }
@@ -135,7 +135,7 @@ fn repo_commands_fail_for_malformed_workspace_list_entry() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: invalid jj workspace list entry",
+            "error[invalid-jj-workspace-list-entry]: invalid jj workspace list entry",
         ))
         .stderr(predicate::str::contains("default"));
 }
@@ -158,7 +158,7 @@ fn repo_commands_fail_for_invalid_workspace_list_current_marker() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: invalid jj workspace list entry",
+            "error[invalid-jj-workspace-list-entry]: invalid jj workspace list entry",
         ))
         .stderr(predicate::str::contains("default"));
 }

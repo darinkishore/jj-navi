@@ -351,7 +351,7 @@ impl Engine {
 
 /// One conflict root: a commit where conflicts begin (its parents are
 /// conflict-free), with the set of conflicted paths.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ConflictRoot {
     /// Commit id (short hex), usable in revsets.
     pub commit_id: String,

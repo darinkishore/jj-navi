@@ -17,35 +17,45 @@ use crate::{Error, Result};
 /// # Errors
 ///
 /// Returns an error if the repo or engine cannot be opened.
-pub fn run_conflicts(path: &Path) -> Result<()> {
+pub fn run_conflicts(path: &Path, json: bool) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let engine = repo.open_engine()?;
     let roots = engine.conflict_roots()?;
 
     if roots.is_empty() {
         eprintln!("no conflicted commits");
-        return Ok(());
+    } else {
+        let total: usize = roots.iter().map(|root| root.conflicted_descendants).sum();
+        eprintln!(
+            "{} conflict root(s) explain ~{total} conflicted commit(s)",
+            roots.len()
+        );
+        for root in &roots {
+            eprintln!(
+                "  {}  blast {}  files: {}",
+                root.commit_id,
+                root.conflicted_descendants,
+                if root.paths.is_empty() {
+                    String::from("(none in tree?)")
+                } else {
+                    root.paths.join(", ")
+                }
+            );
+        }
+        eprintln!();
+        eprintln!("hint: navi resolve --union <file> heals append-only file conflicts at the roots");
     }
 
-    let total: usize = roots.iter().map(|root| root.conflicted_descendants).sum();
-    eprintln!(
-        "{} conflict root(s) explain ~{total} conflicted commit(s)",
-        roots.len()
-    );
-    for root in &roots {
-        eprintln!(
-            "  {}  blast {}  files: {}",
-            root.commit_id,
-            root.conflicted_descendants,
-            if root.paths.is_empty() {
-                String::from("(none in tree?)")
-            } else {
-                root.paths.join(", ")
-            }
+    if json {
+        #[derive(serde::Serialize)]
+        struct ConflictsResult<'a> {
+            roots: &'a [crate::engine::ConflictRoot],
+        }
+        println!(
+            "{}",
+            crate::output::render_json_envelope("conflicts", &ConflictsResult { roots: &roots })?
         );
     }
-    eprintln!();
-    eprintln!("hint: navi resolve --union <file> heals append-only file conflicts at the roots");
     Ok(())
 }
 
@@ -55,7 +65,7 @@ pub fn run_conflicts(path: &Path) -> Result<()> {
 ///
 /// Returns an error if the repo or engine cannot be opened, or if applying
 /// a resolution fails.
-pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool) -> Result<()> {
+pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool, json: bool) -> Result<()> {
     const MAX_PASSES: usize = 10;
 
     let repo = NaviWorkspace::open(path)?;
@@ -75,7 +85,7 @@ pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool) -> Result<
     };
 
     let mut pass = 0;
-    let mut resolved_total = 0usize;
+    let mut resolved: Vec<ResolvedRootJson> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
     loop {
@@ -96,6 +106,9 @@ pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool) -> Result<
 
         if !apply {
             render_union_plan(target_file, &targets);
+            if json {
+                emit_resolve_envelope(target_file, false, pass, &planned_json(&targets), &skipped)?;
+            }
             return Ok(());
         }
 
@@ -122,7 +135,11 @@ pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool) -> Result<
                     "resolved '{target_file}' at {} (pass {pass})",
                     root.commit_id
                 );
-                resolved_total += 1;
+                resolved.push(ResolvedRootJson {
+                    commit_id: root.commit_id.clone(),
+                    conflicted_descendants: root.conflicted_descendants,
+                    pass,
+                });
                 progressed = true;
                 // History changed; re-census before touching more roots.
                 break;
@@ -144,15 +161,68 @@ pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool) -> Result<
         }
         eprintln!();
         eprintln!(
-            "union-resolved '{target_file}' at {resolved_total} root(s) across {pass} pass(es)"
+            "union-resolved '{target_file}' at {} root(s) across {pass} pass(es)",
+            resolved.len()
         );
         if !skipped.is_empty() {
             eprintln!("  {} root(s) skipped as not union-safe", skipped.len());
         }
         eprintln!("  every resolution is a separate jj operation; jj op log to review");
-    } else if resolved_total == 0 && skipped.is_empty() {
+    } else if resolved.is_empty() && skipped.is_empty() {
         eprintln!("no conflict roots carry '{target_file}' — nothing to resolve");
     }
+    if json {
+        emit_resolve_envelope(target_file, apply, pass, &resolved, &skipped)?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct ResolvedRootJson {
+    commit_id: String,
+    conflicted_descendants: usize,
+    /// 0 in plan mode (nothing ran); otherwise the pass that resolved it.
+    pass: usize,
+}
+
+fn planned_json(targets: &[&crate::engine::ConflictRoot]) -> Vec<ResolvedRootJson> {
+    targets
+        .iter()
+        .map(|root| ResolvedRootJson {
+            commit_id: root.commit_id.clone(),
+            conflicted_descendants: root.conflicted_descendants,
+            pass: 0,
+        })
+        .collect()
+}
+
+fn emit_resolve_envelope(
+    target_file: &str,
+    applied: bool,
+    passes: usize,
+    roots: &[ResolvedRootJson],
+    skipped: &[String],
+) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct ResolveResult<'a> {
+        file: &'a str,
+        strategy: &'a str,
+        applied: bool,
+        passes: usize,
+        roots: &'a [ResolvedRootJson],
+        skipped: &'a [String],
+    }
+    println!(
+        "{}",
+        crate::output::render_json_envelope("resolve", &ResolveResult {
+            file: target_file,
+            strategy: "union",
+            applied,
+            passes,
+            roots,
+            skipped,
+        })?
+    );
     Ok(())
 }
 

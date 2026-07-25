@@ -22,6 +22,32 @@ pub struct HealOptions<'a> {
     pub apply: bool,
     /// Maximum number of changes healed per run.
     pub limit: usize,
+    /// Emit a machine envelope on stdout.
+    pub json: bool,
+}
+
+#[derive(serde::Serialize)]
+struct HealReport {
+    applied: bool,
+    healed: Vec<HealedChangeJson>,
+    skipped: Vec<SkippedChangeJson>,
+    filtered: usize,
+    over_limit: usize,
+    abandoned_commits: usize,
+    rebased_chains: usize,
+}
+
+#[derive(serde::Serialize)]
+struct HealedChangeJson {
+    change_id: String,
+    keep_commit: String,
+    abandon_commits: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct SkippedChangeJson {
+    change_id: String,
+    reason: String,
 }
 
 struct PlannedHeal<'a> {
@@ -34,36 +60,33 @@ struct SkippedHeal<'a> {
     reason: String,
 }
 
-/// Run `navi heal`.
-///
-/// # Errors
-///
-/// Returns an error if the repo or engine cannot be opened, or if applying
-/// the plan fails.
-pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
-    let repo = NaviWorkspace::open(path)?;
-    let engine = repo.open_engine()?;
-    let all = engine.divergent_changes()?;
+struct SelectedHeals<'a> {
+    planned: Vec<PlannedHeal<'a>>,
+    skipped: Vec<SkippedHeal<'a>>,
+    filtered: usize,
+    over_limit: usize,
+}
 
-    if all.is_empty() {
-        eprintln!("no divergent changes — nothing to heal");
-        return Ok(());
-    }
+fn select_heals<'a>(
+    all: &'a [DivergentChange],
+    options: &HealOptions<'_>,
+    me: &str,
+) -> SelectedHeals<'a> {
+    let mut selected = SelectedHeals {
+        planned: Vec::new(),
+        skipped: Vec::new(),
+        filtered: 0,
+        over_limit: 0,
+    };
 
-    let me = engine.operation_username();
-    let mut planned: Vec<PlannedHeal> = Vec::new();
-    let mut skipped: Vec<SkippedHeal> = Vec::new();
-    let mut filtered = 0usize;
-    let mut over_limit = 0usize;
-
-    for change in &all {
+    for change in all {
         if !options.changes.is_empty()
             && !options
                 .changes
                 .iter()
                 .any(|prefix| change.change_id.starts_with(prefix.as_str()))
         {
-            filtered += 1;
+            selected.filtered += 1;
             continue;
         }
         if options.mine
@@ -74,7 +97,7 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
                     .is_some_and(|op| op.username == me)
             })
         {
-            filtered += 1;
+            selected.filtered += 1;
             continue;
         }
 
@@ -95,59 +118,138 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
                     loser.wc_of.join("', '")
                 )
             };
-            skipped.push(SkippedHeal { change, reason });
+            selected.skipped.push(SkippedHeal { change, reason });
             continue;
         }
 
-        if planned.len() >= options.limit {
-            over_limit += 1;
+        if selected.planned.len() >= options.limit {
+            selected.over_limit += 1;
             continue;
         }
-        planned.push(PlannedHeal { change, losers });
+        selected.planned.push(PlannedHeal { change, losers });
     }
+
+    selected
+}
+
+/// Run `navi heal`.
+///
+/// # Errors
+///
+/// Returns an error if the repo or engine cannot be opened, or if applying
+/// the plan fails.
+pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
+    let repo = NaviWorkspace::open(path)?;
+    let engine = repo.open_engine()?;
+    let all = engine.divergent_changes()?;
+
+    if all.is_empty() {
+        eprintln!("no divergent changes — nothing to heal");
+        if options.json {
+            emit_heal_envelope(options.apply, &[], &[], 0, 0, 0, 0)?;
+        }
+        return Ok(());
+    }
+
+    let plan = select_heals(&all, options, engine.operation_username());
+    let SelectedHeals {
+        planned,
+        skipped,
+        filtered,
+        over_limit,
+    } = plan;
 
     render_plan(&planned, &skipped, filtered, over_limit, options.apply);
 
-    if !options.apply {
-        if !planned.is_empty() {
-            eprintln!();
-            eprintln!("plan only; rerun with --apply to heal");
-        }
-        return Ok(());
-    }
-    if planned.is_empty() {
-        return Ok(());
-    }
-
-    let loser_ids: Vec<String> = planned
-        .iter()
-        .flat_map(|heal| heal.losers.iter().map(|loser| loser.commit_id.clone()))
-        .collect();
     let mut rebased_chains = 0usize;
-    repo.with_mutation_lock(|| {
-        let jj = repo.main_jj_client();
-        // Move stacked descendants from each stale sibling onto its winner
-        // (same change, newer version) before abandoning the stale side.
-        for heal in &planned {
-            let winner = &heal.change.siblings[0];
-            for loser in &heal.losers {
-                if loser.has_children {
-                    jj.rebase_children_onto(&loser.commit_id, &winner.commit_id)?;
-                    rebased_chains += 1;
+    let mut abandoned = 0usize;
+    if options.apply && !planned.is_empty() {
+        let loser_ids: Vec<String> = planned
+            .iter()
+            .flat_map(|heal| heal.losers.iter().map(|loser| loser.commit_id.clone()))
+            .collect();
+        repo.with_mutation_lock(|| {
+            let jj = repo.main_jj_client();
+            // Move stacked descendants from each stale sibling onto its
+            // winner (same change, newer version) before abandoning the
+            // stale side.
+            for heal in &planned {
+                let winner = &heal.change.siblings[0];
+                for loser in &heal.losers {
+                    if loser.has_children {
+                        jj.rebase_children_onto(&loser.commit_id, &winner.commit_id)?;
+                        rebased_chains += 1;
+                    }
                 }
             }
-        }
-        jj.abandon_commits(&loser_ids)
-    })?;
+            jj.abandon_commits(&loser_ids)
+        })?;
+        abandoned = loser_ids.len();
 
-    eprintln!();
-    eprintln!(
-        "healed {} change(s): abandoned {} stale sibling(s), rebased {} descendant chain(s)",
-        planned.len(),
-        loser_ids.len(),
-        rebased_chains
-    );
-    eprintln!("  each rebase and the final abandon are separate jj operations; jj op undo reverses the most recent");
+        eprintln!();
+        eprintln!(
+            "healed {} change(s): abandoned {} stale sibling(s), rebased {} descendant chain(s)",
+            planned.len(),
+            abandoned,
+            rebased_chains
+        );
+        eprintln!("  each rebase and the final abandon are separate jj operations; jj op undo reverses the most recent");
+    } else if !options.apply && !planned.is_empty() {
+        eprintln!();
+        eprintln!("plan only; rerun with --apply to heal");
+    }
+
+    if options.json {
+        emit_heal_envelope(
+            options.apply,
+            &planned,
+            &skipped,
+            filtered,
+            over_limit,
+            abandoned,
+            rebased_chains,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)] // flat envelope inputs
+fn emit_heal_envelope(
+    applied: bool,
+    planned: &[PlannedHeal<'_>],
+    skipped: &[SkippedHeal<'_>],
+    filtered: usize,
+    over_limit: usize,
+    abandoned_commits: usize,
+    rebased_chains: usize,
+) -> Result<()> {
+    let report = HealReport {
+        applied,
+        healed: planned
+            .iter()
+            .map(|heal| HealedChangeJson {
+                change_id: heal.change.change_id.clone(),
+                keep_commit: heal.change.siblings[0].commit_id.clone(),
+                abandon_commits: heal
+                    .losers
+                    .iter()
+                    .map(|loser| loser.commit_id.clone())
+                    .collect(),
+            })
+            .collect(),
+        skipped: skipped
+            .iter()
+            .map(|skip| SkippedChangeJson {
+                change_id: skip.change.change_id.clone(),
+                reason: skip.reason.clone(),
+            })
+            .collect(),
+        filtered,
+        over_limit,
+        abandoned_commits,
+        rebased_chains,
+    };
+    println!("{}", crate::output::render_json_envelope("heal", &report)?);
     Ok(())
 }
 

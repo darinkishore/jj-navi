@@ -483,3 +483,71 @@ fn lane_land_leaves_peers_fresh_without_divergence() {
         "fan-out must not mint divergent changes: {divergent}"
     );
 }
+
+#[test]
+fn lane_open_json_emits_machine_envelope_on_stdout() {
+    let repo = TempJjRepo::new();
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "open", "alpha", "--path", "src", "--json"],
+    );
+    assert_success(&output, "lane open --json");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is one JSON envelope");
+    assert_eq!(envelope["ok"], serde_json::Value::Bool(true));
+    assert_eq!(envelope["command"], "lane open");
+    assert_eq!(envelope["result"]["name"], "alpha");
+    assert_eq!(envelope["result"]["paths"][0], "src");
+}
+
+#[test]
+fn lane_land_json_emits_machine_envelope_and_errors_carry_codes() {
+    let repo = TempJjRepo::new();
+    let lane = open_lane(&repo, "alpha", "src");
+    write_lane_file(&lane, "src/alpha.txt", "alpha work\n");
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "land", "alpha", "-m", "alpha work", "--json"],
+    );
+    assert_success(&output, "lane land --json");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("land envelope parses");
+    assert_eq!(envelope["ok"], serde_json::Value::Bool(true));
+    assert_eq!(envelope["command"], "lane land");
+    assert_eq!(envelope["result"]["landed_changes"], 1);
+
+    // Landing again with nothing new must fail with a stable error code on
+    // stdout while the human message stays on stderr.
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "land", "alpha", "--json"],
+    );
+    assert!(!output.status.success(), "second land should fail");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("error envelope parses");
+    assert_eq!(envelope["ok"], serde_json::Value::Bool(false));
+    assert_eq!(envelope["code"], "lane-nothing-to-land");
+    assert!(stderr_of(&output).contains("error[lane-nothing-to-land]:"));
+}
+
+#[test]
+fn repo_flag_targets_a_repo_from_outside_it() {
+    let repo = TempJjRepo::new();
+    let outside = tempfile::tempdir().expect("outside dir");
+    let repo_path = repo.path().display().to_string();
+
+    let output = command_output(
+        "navi",
+        outside.path(),
+        &["-R", &repo_path, "lane", "open", "alpha", "--path", "src", "--json"],
+    );
+    assert_success(&output, "lane open via -R");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("envelope parses");
+    assert_eq!(envelope["result"]["name"], "alpha");
+    assert!(lane_dir(&repo, "alpha").is_dir());
+}

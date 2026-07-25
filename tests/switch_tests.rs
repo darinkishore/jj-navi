@@ -160,7 +160,7 @@ fn switch_fails_for_forgotten_workspace_even_if_directory_remains() {
         .args(["switch", "feature-auth"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("error: workspace does not exist"));
+        .stderr(predicate::str::contains("error[workspace-does-not-exist]: workspace does not exist"));
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn switch_fails_with_last_known_path_when_fallback_directory_is_missing() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: workspace 'feature-auth' exists, but its directory could not be resolved",
+            "error[workspace-directory-unavailable]: workspace 'feature-auth' exists, but its directory could not be resolved",
         ))
         .stderr(predicate::str::contains(format!(
             "hint: last known path: ../{}.feature-auth",
@@ -384,7 +384,7 @@ fn switch_dash_fails_when_no_previous_workspace_recorded() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: no previous workspace recorded for this repository",
+            "error[no-previous-workspace]: no previous workspace recorded for this repository",
         ))
         .stderr(predicate::str::contains(
             "hint: switch to a different workspace first",
@@ -638,7 +638,7 @@ fn switch_dash_fails_when_previous_workspace_no_longer_exists() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: previous workspace 'feature-auth' no longer exists in this repository",
+            "error[previous-workspace-not-found]: previous workspace 'feature-auth' no longer exists in this repository",
         ))
         .stderr(predicate::str::contains(
             "hint: switch to an existing workspace first",
@@ -880,7 +880,7 @@ fn switch_create_caret_fails_because_caret_is_reserved() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: '^' is a reserved switch target",
+            "error[reserved-switch-target]: '^' is a reserved switch target",
         ));
 }
 

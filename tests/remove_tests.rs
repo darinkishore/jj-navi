@@ -90,11 +90,11 @@ fn remove_without_yes_requires_confirmation_and_deletes_on_yes() {
         .write_stdin("yes\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains(
+        .stderr(predicate::str::contains(
             "permanently remove workspace 'feature-auth'",
         ))
-        .stdout(predicate::str::contains(feature_path_display))
-        .stdout(predicate::str::contains("Type 'yes' to continue:"))
+        .stderr(predicate::str::contains(feature_path_display))
+        .stderr(predicate::str::contains("Type 'yes' to continue:"))
         .stdout(predicate::str::contains("deleted workspace directory"));
 
     assert!(!feature_path.exists());
@@ -119,8 +119,8 @@ fn remove_without_yes_cancels_when_confirmation_is_not_yes() {
         .write_stdin("n\n")
         .assert()
         .failure()
-        .stdout(predicate::str::contains("Directory to delete:"))
-        .stderr(predicate::str::contains("error: remove cancelled"));
+        .stderr(predicate::str::contains("Directory to delete:"))
+        .stderr(predicate::str::contains("error[remove-cancelled]: remove cancelled"));
 
     assert!(feature_path.is_dir());
     assert!(repo.run(&["workspace", "list"]).contains("feature-auth"));
@@ -160,7 +160,7 @@ fn remove_current_workspace_fails_and_keeps_metadata() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: cannot remove current workspace",
+            "error[cannot-remove-current-workspace]: cannot remove current workspace",
         ));
 
     assert!(feature_path.is_dir());
@@ -214,7 +214,7 @@ fn remove_missing_workspace_fails_with_useful_error() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "error: workspace 'does-not-exist' does not exist",
+            "error[workspace-not-found]: workspace 'does-not-exist' does not exist",
         ));
 }
 

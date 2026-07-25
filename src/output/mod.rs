@@ -399,7 +399,77 @@ pub fn render_error_message(message: &str) -> String {
         .join("\n")
 }
 
+/// Render a domain error with its stable machine code: `error[<code>]: ...`.
+#[must_use]
+pub fn render_domain_error(error: &crate::Error) -> String {
+    let message = error.to_string();
+    let coded = message.strip_prefix("error: ").map_or_else(
+        || format!("error[{}]: {message}", error.code()),
+        |rest| format!("error[{}]: {rest}", error.code()),
+    );
+    render_error_message(&coded)
+}
+
+/// Render a `--json` machine envelope for a successful command.
+///
+/// # Errors
+///
+/// Returns an error if the result cannot be serialized.
+pub fn render_json_envelope(
+    command: &str,
+    result: &impl serde::Serialize,
+) -> crate::Result<String> {
+    #[derive(serde::Serialize)]
+    struct Envelope<'a, T> {
+        ok: bool,
+        command: &'a str,
+        result: &'a T,
+    }
+
+    serde_json::to_string_pretty(&Envelope {
+        ok: true,
+        command,
+        result,
+    })
+    .map_err(|error| crate::Error::JsonSerialization(error.to_string()))
+}
+
+/// Render a `--json` machine envelope for a failed command.
+#[must_use]
+pub fn render_json_error(command: &str, error: &crate::Error) -> String {
+    #[derive(serde::Serialize)]
+    struct ErrorEnvelope<'a> {
+        ok: bool,
+        command: &'a str,
+        code: &'a str,
+        message: String,
+    }
+
+    let payload = ErrorEnvelope {
+        ok: false,
+        command,
+        code: error.code(),
+        message: error
+            .to_string()
+            .strip_prefix("error: ")
+            .map_or_else(|| error.to_string(), ToOwned::to_owned),
+    };
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| {
+        format!(
+            "{{\"ok\":false,\"command\":{command:?},\"code\":{:?},\"message\":\"unserializable error\"}}",
+            error.code()
+        )
+    })
+}
+
 fn colorize_error_line(line: &str) -> String {
+    // `error[<code>]:` carries the machine code; style the whole prefix.
+    if line.starts_with("error[")
+        && let Some(end) = line.find("]:")
+    {
+        let (prefix, rest) = line.split_at(end + 2);
+        return format!("{}{}", styled_prefix(prefix, theme().error_prefix), rest);
+    }
     if let Some(rest) = line.strip_prefix("error:") {
         return format!("{}{}", styled_prefix("error:", theme().error_prefix), rest);
     }

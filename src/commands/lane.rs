@@ -4,8 +4,8 @@ use std::path::Path;
 use crate::Error;
 use crate::Result;
 use crate::output::{
-    render_lane_abandon_outcome, render_lane_gc, render_lane_land_outcome, render_lane_list,
-    render_lane_list_json, render_lane_open_outcome, render_lane_sync_outcomes,
+    render_json_envelope, render_lane_abandon_outcome, render_lane_gc, render_lane_land_outcome,
+    render_lane_list, render_lane_list_json, render_lane_open_outcome, render_lane_sync_outcomes,
 };
 use crate::repo::NaviWorkspace;
 use crate::types::{LanePath, WorkspaceName};
@@ -21,12 +21,16 @@ pub fn run_lane_open(
     paths: &[String],
     allow_overlap: bool,
     sparse: Option<bool>,
+    json: bool,
 ) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let name = WorkspaceName::new(name.to_owned())?;
     let paths = parse_lane_paths(paths)?;
     let outcome = repo.lane_open(&name, paths, allow_overlap, sparse)?;
     eprint!("{}", render_lane_open_outcome(&outcome));
+    if json {
+        println!("{}", render_json_envelope("lane open", &outcome)?);
+    }
     Ok(())
 }
 
@@ -40,6 +44,7 @@ pub fn run_lane_claim(
     name: &str,
     paths: &[String],
     allow_overlap: bool,
+    json: bool,
 ) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let name = WorkspaceName::new(name.to_owned())?;
@@ -53,6 +58,23 @@ pub fn run_lane_claim(
             .collect::<Vec<_>>()
             .join(", ")
     );
+    if json {
+        #[derive(serde::Serialize)]
+        struct ClaimResult<'a> {
+            name: &'a WorkspaceName,
+            write_set: &'a [LanePath],
+        }
+        println!(
+            "{}",
+            render_json_envelope(
+                "lane claim",
+                &ClaimResult {
+                    name: &name,
+                    write_set: &merged,
+                }
+            )?
+        );
+    }
     Ok(())
 }
 
@@ -77,13 +99,30 @@ pub fn run_lane_list(path: &Path, json: bool, compact: bool) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if a named lane is unknown or trunk cannot be resolved.
-pub fn run_lane_sync(path: &Path, name: Option<&str>, drop_unscoped: bool) -> Result<()> {
+pub fn run_lane_sync(
+    path: &Path,
+    name: Option<&str>,
+    drop_unscoped: bool,
+    json: bool,
+) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let name = name
         .map(|value| WorkspaceName::new(value.to_owned()))
         .transpose()?;
     let outcomes = repo.lane_sync(name.as_ref(), drop_unscoped)?;
     eprint!("{}", render_lane_sync_outcomes(&outcomes));
+    if json {
+        #[derive(serde::Serialize)]
+        struct SyncResult<'a> {
+            outcomes: &'a [crate::types::LaneSyncOutcome],
+        }
+        println!(
+            "{}",
+            render_json_envelope("lane sync", &SyncResult {
+                outcomes: &outcomes
+            })?
+        );
+    }
     Ok(())
 }
 
@@ -98,11 +137,15 @@ pub fn run_lane_land(
     message: Option<&str>,
     no_gate: bool,
     close: bool,
+    json: bool,
 ) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let name = WorkspaceName::new(name.to_owned())?;
     let outcome = repo.lane_land(&name, message, no_gate, close)?;
     eprint!("{}", render_lane_land_outcome(&outcome));
+    if json {
+        println!("{}", render_json_envelope("lane land", &outcome)?);
+    }
     Ok(())
 }
 
@@ -111,12 +154,29 @@ pub fn run_lane_land(
 /// # Errors
 ///
 /// Returns an error if the lane still has unlanded work.
-pub fn run_lane_close(path: &Path, name: &str) -> Result<()> {
+pub fn run_lane_close(path: &Path, name: &str, json: bool) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let name = WorkspaceName::new(name.to_owned())?;
     let removed = repo.lane_close(&name)?;
     eprintln!("closed lane '{name}'");
     eprintln!("  removed: {}", removed.display());
+    if json {
+        #[derive(serde::Serialize)]
+        struct CloseResult<'a> {
+            name: &'a WorkspaceName,
+            removed_directory: &'a Path,
+        }
+        println!(
+            "{}",
+            render_json_envelope(
+                "lane close",
+                &CloseResult {
+                    name: &name,
+                    removed_directory: &removed,
+                }
+            )?
+        );
+    }
     Ok(())
 }
 
@@ -125,7 +185,7 @@ pub fn run_lane_close(path: &Path, name: &str) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if the lane is unknown or archival fails.
-pub fn run_lane_abandon(path: &Path, name: &str, yes: bool) -> Result<()> {
+pub fn run_lane_abandon(path: &Path, name: &str, yes: bool, json: bool) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let name = WorkspaceName::new(name.to_owned())?;
     if !yes {
@@ -135,6 +195,9 @@ pub fn run_lane_abandon(path: &Path, name: &str, yes: bool) -> Result<()> {
     }
     let outcome = repo.lane_abandon(&name)?;
     eprint!("{}", render_lane_abandon_outcome(&outcome));
+    if json {
+        println!("{}", render_json_envelope("lane abandon", &outcome)?);
+    }
     Ok(())
 }
 
@@ -143,26 +206,38 @@ pub fn run_lane_abandon(path: &Path, name: &str, yes: bool) -> Result<()> {
 /// # Errors
 ///
 /// Returns an error if discovery, forgetting, or registry saves fail.
-pub fn run_lane_gc(path: &Path, apply: bool, yes: bool) -> Result<()> {
+pub fn run_lane_gc(path: &Path, apply: bool, yes: bool, json: bool) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let plan = repo.lane_gc_plan()?;
-    if !apply {
-        eprint!("{}", render_lane_gc(&plan, false));
-        return Ok(());
+    let nothing_to_do = plan.ghost_workspaces.is_empty() && plan.orphaned_lanes.is_empty();
+    let applied = if apply && !nothing_to_do {
+        if !yes {
+            confirm(&format!(
+                "This will forget {} ghost workspace(s) and abandon {} orphaned lane(s).",
+                plan.ghost_workspaces.len(),
+                plan.orphaned_lanes.len()
+            ))?;
+        }
+        repo.lane_gc_apply(&plan)?;
+        true
+    } else {
+        false
+    };
+    eprint!("{}", render_lane_gc(&plan, applied));
+    if json {
+        #[derive(serde::Serialize)]
+        struct GcResult<'a> {
+            plan: &'a crate::types::LaneGcPlan,
+            applied: bool,
+        }
+        println!(
+            "{}",
+            render_json_envelope("lane gc", &GcResult {
+                plan: &plan,
+                applied,
+            })?
+        );
     }
-    if plan.ghost_workspaces.is_empty() && plan.orphaned_lanes.is_empty() {
-        eprint!("{}", render_lane_gc(&plan, false));
-        return Ok(());
-    }
-    if !yes {
-        confirm(&format!(
-            "This will forget {} ghost workspace(s) and abandon {} orphaned lane(s).",
-            plan.ghost_workspaces.len(),
-            plan.orphaned_lanes.len()
-        ))?;
-    }
-    repo.lane_gc_apply(&plan)?;
-    eprint!("{}", render_lane_gc(&plan, true));
     Ok(())
 }
 
@@ -173,10 +248,12 @@ fn parse_lane_paths(paths: &[String]) -> Result<Vec<LanePath>> {
         .collect()
 }
 
+/// Interactive destructive-action confirmation. The prompt goes to stderr:
+/// stdout is reserved for machine output.
 fn confirm(prompt: &str) -> Result<()> {
-    println!("{prompt}");
-    print!("Type 'yes' to continue: ");
-    io::stdout().flush()?;
+    eprintln!("{prompt}");
+    eprint!("Type 'yes' to continue: ");
+    io::stderr().flush()?;
 
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;

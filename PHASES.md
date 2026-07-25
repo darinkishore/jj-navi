@@ -50,6 +50,16 @@ sts_mods runbook (not yet executed), and the backlog.
   was concurrently rewritten makes the jj command fail with an error, never
   silently operate on the wrong thing. Descendant sets (e.g. heal's
   rebase-children) are evaluated by jj at execution time under the lock.
+- **Interrupt-safe**: a killed navi releases the mutation lock (OS file
+  lock on the fd), and every mutation is a jj op — there is no half-done
+  command, only clean op boundaries (`jj op log` / `op undo`). Multi-step
+  sequences are ordered so interrupted states are visible and repairable:
+  registry-before-workspace on open (gc catches orphans),
+  archive-before-delete on remove/abandon, pin-before-gate on land
+  (killed pre-advance → re-land; post-advance → `lane-nothing-to-land`,
+  benign), snapshot-before-rebase in fan-out (stale at worst, never
+  divergent; auto-recovered on next touch), self-cleaning scratch
+  workspace in the resolve squash path. Residual: stray temp files.
 - **Residual, by design**: raw `jj` run outside navi is not serialized by
   navi's lock. jj itself never corrupts under concurrency (op-log merge);
   the worst outcome is divergence, which `doctor --deep` surfaces and

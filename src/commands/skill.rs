@@ -50,7 +50,10 @@ Two landing modes, set in repo config (`navi config show`):
    Amending landed changes smears conflicts into everyone's descendants
    (doctor flags this as merged-then-amended).
 6. **Everything navi does is jj-native and undoable**: `jj op log` to see
-   what happened, `jj op undo` / `jj op restore <op>` to unwind.
+   what happened, `jj op undo` / `jj op restore <op>` to unwind. Killing
+   navi mid-command is safe: the lock releases with the process, every
+   mutation is an atomic jj op, and interrupted sequences land in states
+   that gc/sync/doctor detect and repair — never corruption.
 
 ## Machine interface
 

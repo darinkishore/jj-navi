@@ -85,6 +85,22 @@ enum Commands {
         #[arg(long, default_value_t = 100, help = "Maximum changes healed per run")]
         limit: usize,
     },
+    #[command(about = "Census conflict roots: where conflicts begin, ranked by blast radius")]
+    Conflicts,
+    #[command(
+        about = "Auto-resolve conflicts structurally; --union keeps both sides of an append-only file"
+    )]
+    Resolve {
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "Union-merge this repo-relative file at every conflict root"
+        )]
+        union: String,
+
+        #[arg(long, help = "Apply the resolutions instead of printing the plan")]
+        apply: bool,
+    },
     #[command(about = "Run a raw jj command under navi's umbrella (un-stale first, serialized)")]
     Exec {
         #[arg(
@@ -309,6 +325,7 @@ pub fn run(bin_name: &'static str, args: impl IntoIterator<Item = OsString>) -> 
     }
 }
 
+#[allow(clippy::too_many_lines)] // flat subcommand dispatcher
 fn try_run(
     bin_name: &'static str,
     args: impl IntoIterator<Item = OsString>,
@@ -348,6 +365,10 @@ fn try_run(
                     limit,
                 },
             )?;
+        }
+        Commands::Conflicts => commands::resolve::run_conflicts(&path)?,
+        Commands::Resolve { union, apply } => {
+            commands::resolve::run_resolve_union(&path, &union, apply)?;
         }
         Commands::Exec { workspace, args } => {
             return Ok(commands::exec::run_exec(&path, workspace.as_deref(), &args)?);

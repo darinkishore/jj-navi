@@ -80,25 +80,22 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
 
         // Siblings are sorted newest-op first; the winner is siblings[0].
         let losers: Vec<&DivergentSibling> = change.siblings.iter().skip(1).collect();
-        if let Some(loser) = losers.iter().find(|loser| !loser.wc_of.is_empty()) {
-            skipped.push(SkippedHeal {
-                change,
-                reason: format!(
+        // One-writer law: never rewrite a chain that contains a live
+        // working copy — that is how divergence gets minted, not healed.
+        if let Some(loser) = losers.iter().find(|loser| loser.blocks_wc) {
+            let reason = if loser.wc_of.is_empty() {
+                format!(
+                    "stale sibling {} carries a workspace's working copy in its descendants",
+                    loser.commit_id
+                )
+            } else {
+                format!(
                     "stale sibling {} is the working copy of workspace '{}'",
                     loser.commit_id,
                     loser.wc_of.join("', '")
-                ),
-            });
-            continue;
-        }
-        if let Some(loser) = losers.iter().find(|loser| loser.has_children) {
-            skipped.push(SkippedHeal {
-                change,
-                reason: format!(
-                    "stale sibling {} has stacked descendants; heal manually",
-                    loser.commit_id
-                ),
-            });
+                )
+            };
+            skipped.push(SkippedHeal { change, reason });
             continue;
         }
 
@@ -126,18 +123,31 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
         .iter()
         .flat_map(|heal| heal.losers.iter().map(|loser| loser.commit_id.clone()))
         .collect();
+    let mut rebased_chains = 0usize;
     repo.with_mutation_lock(|| {
         let jj = repo.main_jj_client();
+        // Move stacked descendants from each stale sibling onto its winner
+        // (same change, newer version) before abandoning the stale side.
+        for heal in &planned {
+            let winner = &heal.change.siblings[0];
+            for loser in &heal.losers {
+                if loser.has_children {
+                    jj.rebase_children_onto(&loser.commit_id, &winner.commit_id)?;
+                    rebased_chains += 1;
+                }
+            }
+        }
         jj.abandon_commits(&loser_ids)
     })?;
 
     eprintln!();
     eprintln!(
-        "healed {} change(s): abandoned {} stale sibling(s) in one operation",
+        "healed {} change(s): abandoned {} stale sibling(s), rebased {} descendant chain(s)",
         planned.len(),
-        loser_ids.len()
+        loser_ids.len(),
+        rebased_chains
     );
-    eprintln!("  undo with: jj op undo");
+    eprintln!("  each rebase and the final abandon are separate jj operations; jj op undo reverses the most recent");
     Ok(())
 }
 
@@ -152,7 +162,13 @@ fn render_plan(
     for heal in planned {
         eprintln!("{verb} change {}", heal.change.change_id);
         for (index, sibling) in heal.change.siblings.iter().enumerate() {
-            let role = if index == 0 { "keep   " } else { "abandon" };
+            let role = if index == 0 {
+                "keep   "
+            } else if sibling.has_children {
+                "abandon (rebasing its descendants onto keep)"
+            } else {
+                "abandon"
+            };
             eprintln!("  {role} {}", describe_sibling(sibling));
         }
     }

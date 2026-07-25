@@ -72,6 +72,9 @@ pub struct DivergentSibling {
     pub wc_of: Vec<String>,
     /// Whether the sibling has visible child commits.
     pub has_children: bool,
+    /// Whether some workspace's working copy is this commit or one of its
+    /// descendants (touching it would rewrite a live chain from outside).
+    pub blocks_wc: bool,
 }
 
 /// Provenance of a commit: the operation that minted it.
@@ -179,6 +182,7 @@ impl Engine {
             .collect();
         let provenance = self.provenance_for(&all_ids)?;
         let children = self.commits_with_visible_children(&all_ids)?;
+        let blocked = self.commits_with_wc_descendant(&all_ids)?;
 
         let mut wc_of: HashMap<CommitId, Vec<String>> = HashMap::new();
         for (name, commit_id) in self.repo.view().wc_commit_ids() {
@@ -210,6 +214,7 @@ impl Engine {
                     op: provenance.get(&id).cloned(),
                     wc_of: wc_of.get(&id).cloned().unwrap_or_default(),
                     has_children: children.contains(&id),
+                    blocks_wc: blocked.contains(&id),
                 });
             }
             // Newest first so callers can default to first-is-winner.
@@ -341,6 +346,202 @@ impl Engine {
             }
         }
         Ok(with_children)
+    }
+}
+
+/// One conflict root: a commit where conflicts begin (its parents are
+/// conflict-free), with the set of conflicted paths.
+#[derive(Clone, Debug)]
+pub struct ConflictRoot {
+    /// Commit id (short hex), usable in revsets.
+    pub commit_id: String,
+    /// Number of visible descendants (including self) that carry conflicts.
+    pub conflicted_descendants: usize,
+    /// Conflicted repo-relative paths in this commit's tree.
+    pub paths: Vec<String>,
+}
+
+impl Engine {
+    /// Enumerate conflict roots with blast radius and conflicted paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if revset evaluation or tree reads fail.
+    pub fn conflict_roots(&self) -> Result<Vec<ConflictRoot>> {
+        use jj_lib::revset::RevsetFilterPredicate;
+
+        let repo = self.repo.as_ref();
+        let conflicted = RevsetExpression::all()
+            .filtered(RevsetFilterPredicate::HasConflict);
+        let roots_expr = conflicted.roots();
+        let revset = roots_expr
+            .evaluate(repo)
+            .map_err(|error| engine_error("evaluate conflict roots", error))?;
+        let root_ids: Vec<CommitId> = pollster::block_on(revset.stream().try_collect())
+            .map_err(|error| engine_error("collect conflict roots", error))?;
+        drop(revset);
+
+        let mut roots = Vec::new();
+        for id in root_ids {
+            let commit = self
+                .repo
+                .store()
+                .get_commit(&id)
+                .map_err(|error| engine_error("load conflict root", error))?;
+            let tree = commit.tree();
+            let paths: Vec<String> = tree
+                .conflicts()
+                .map(|(path, _value)| path.as_internal_file_string().to_owned())
+                .collect();
+
+            let blast = RevsetExpression::commits(vec![id.clone()])
+                .descendants()
+                .filtered(RevsetFilterPredicate::HasConflict);
+            let revset = blast
+                .evaluate(repo)
+                .map_err(|error| engine_error("evaluate blast radius", error))?;
+            let conflicted_descendants: Vec<CommitId> =
+                pollster::block_on(revset.stream().try_collect())
+                    .map_err(|error| engine_error("collect blast radius", error))?;
+            drop(revset);
+
+            roots.push(ConflictRoot {
+                commit_id: short_hex(&id.hex()),
+                conflicted_descendants: conflicted_descendants.len(),
+                paths,
+            });
+        }
+        roots.sort_by_key(|root| std::cmp::Reverse(root.conflicted_descendants));
+        Ok(roots)
+    }
+
+    /// Union-merge a conflicted file at `commit_id` (short hex): jj's hunk
+    /// merge with conflicted hunks resolved by concatenating every side.
+    ///
+    /// Returns `None` when the path's conflict is not a clean file conflict
+    /// (deleted side, binary, non-file terms) and must be handled manually.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on store failures or if the commit/path is unknown.
+    pub fn union_merge_file(&self, commit_id: &str, path: &str) -> Result<Option<Vec<u8>>> {
+        use jj_lib::repo_path::RepoPath;
+
+        let repo = self.repo.as_ref();
+        // Resolve the (possibly short) hex id via the store's index.
+        let full = self
+            .repo
+            .view()
+            .heads()
+            .iter()
+            .find(|id| id.hex().starts_with(commit_id))
+            .cloned();
+        let id = if let Some(id) = full {
+            id
+        } else {
+            // Fall back to a revset lookup over all visible commits.
+            let expr = RevsetExpression::all();
+            let revset = expr
+                .evaluate(repo)
+                .map_err(|error| engine_error("evaluate all()", error))?;
+            let ids: Vec<CommitId> = pollster::block_on(revset.stream().try_collect())
+                .map_err(|error| engine_error("resolve commit id", error))?;
+            drop(revset);
+            match ids.into_iter().find(|id| id.hex().starts_with(commit_id)) {
+                Some(id) => id,
+                None => {
+                    return Err(Error::Engine {
+                        message: format!("commit {commit_id} not found"),
+                    });
+                }
+            }
+        };
+
+        let commit = self
+            .repo
+            .store()
+            .get_commit(&id)
+            .map_err(|error| engine_error("load commit", error))?;
+        let tree = commit.tree();
+        let repo_path = RepoPath::from_internal_string(path)
+            .map_err(|error| engine_error("parse path", error))?;
+        let value = pollster::block_on(tree.path_value(repo_path))
+            .map_err(|error| engine_error("read path value", error))?;
+        if value.is_resolved() {
+            return Ok(None);
+        }
+        let Some(file_merge) = value.to_file_merge() else {
+            return Ok(None); // non-file terms (directories, symlinks, absent)
+        };
+        if file_merge.iter().any(Option::is_none) {
+            return Ok(None); // a side deleted the file; not union material
+        }
+
+        let contents = pollster::block_on(jj_lib::conflicts::extract_as_single_hunk(
+            &file_merge,
+            self.repo.store(),
+            repo_path,
+        ))
+        .map_err(|error| engine_error("read conflict contents", error))?;
+        if contents
+            .iter()
+            .any(|content| content.contains(&0u8))
+        {
+            return Ok(None); // binary content; refuse
+        }
+
+        let options = jj_lib::tree_merge::MergeOptions::from_settings(self.repo.settings())
+            .map_err(|error| engine_error("merge options", error))?;
+        let mut merged = Vec::new();
+        match jj_lib::files::merge_hunks(&contents, &options) {
+            jj_lib::files::MergeResult::Resolved(content) => merged.extend_from_slice(&content),
+            jj_lib::files::MergeResult::Conflict(hunks) => {
+                for hunk in hunks {
+                    if let Some(resolved) = hunk.as_resolved() {
+                        merged.extend_from_slice(resolved);
+                    } else {
+                        // Union: keep every side's lines, in term order.
+                        for side in hunk.adds() {
+                            merged.extend_from_slice(side);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Some(merged))
+    }
+    fn commits_with_wc_descendant(&self, ids: &[CommitId]) -> Result<HashSet<CommitId>> {
+        let repo = self.repo.as_ref();
+        let wc_ids: Vec<CommitId> = repo.view().wc_commit_ids().values().cloned().collect();
+        if wc_ids.is_empty() || ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        // Working copies sitting on any of `ids`.
+        let affected = RevsetExpression::commits(ids.to_vec())
+            .descendants()
+            .intersection(&RevsetExpression::commits(wc_ids));
+        let revset = affected
+            .evaluate(repo)
+            .map_err(|error| engine_error("evaluate wc descendants", error))?;
+        let affected_wcs: Vec<CommitId> = pollster::block_on(revset.stream().try_collect())
+            .map_err(|error| engine_error("collect wc descendants", error))?;
+        drop(revset);
+
+        // Attribute each affected working copy back to the ids beneath it.
+        let mut blocked = HashSet::new();
+        for wc in affected_wcs {
+            let ancestors = RevsetExpression::commits(vec![wc])
+                .ancestors()
+                .intersection(&RevsetExpression::commits(ids.to_vec()));
+            let revset = ancestors
+                .evaluate(repo)
+                .map_err(|error| engine_error("evaluate wc ancestry", error))?;
+            let hits: Vec<CommitId> = pollster::block_on(revset.stream().try_collect())
+                .map_err(|error| engine_error("collect wc ancestry", error))?;
+            blocked.extend(hits);
+        }
+        Ok(blocked)
     }
 }
 

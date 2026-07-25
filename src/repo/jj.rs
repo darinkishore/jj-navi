@@ -333,6 +333,49 @@ impl<'a> JjClient<'a> {
         self.run_capture(&[OsString::from("duplicate"), OsString::from(revset)])
     }
 
+    /// Resolve one conflicted file in `revision` to prepared content.
+    ///
+    /// Uses a one-shot configured merge tool that copies `prepared` into
+    /// place, so jj performs the commit rewrite, descendant rebases, and
+    /// op-log entry natively.
+    pub(crate) fn resolve_with_prepared_file(
+        &self,
+        revision: &str,
+        path: &str,
+        prepared: &Path,
+    ) -> Result<()> {
+        let prepared = prepared.to_str().ok_or_else(|| Error::Engine {
+            message: String::from("prepared resolution path is not UTF-8"),
+        })?;
+        self.run(&[
+            OsString::from("--config"),
+            OsString::from("merge-tools.navi-apply.program=cp"),
+            OsString::from("--config"),
+            OsString::from(format!(
+                "merge-tools.navi-apply.merge-args=[\"{prepared}\", \"$output\"]"
+            )),
+            OsString::from("resolve"),
+            OsString::from("-r"),
+            OsString::from(revision),
+            OsString::from("--tool"),
+            OsString::from("navi-apply"),
+            OsString::from(fileset_exact_pattern(path)),
+        ])
+        .map(|_| ())
+    }
+
+    /// Rebase every visible child of `parent` onto `destination`.
+    pub(crate) fn rebase_children_onto(&self, parent: &str, destination: &str) -> Result<()> {
+        self.run(&[
+            OsString::from("rebase"),
+            OsString::from("-s"),
+            OsString::from(format!("children({parent})")),
+            OsString::from("-d"),
+            OsString::from(destination),
+        ])
+        .map(|_| ())
+    }
+
     /// Abandon commits by id in a single operation (atomic, `jj op undo`
     /// reverses the whole batch).
     pub(crate) fn abandon_commits(&self, commit_ids: &[String]) -> Result<()> {

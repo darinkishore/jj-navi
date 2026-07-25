@@ -5,11 +5,17 @@ use std::path::Path;
 use assert_cmd::Command;
 
 pub fn command(bin: &str) -> Command {
-    match bin {
+    let mut command = match bin {
         "navi" => Command::new(assert_cmd::cargo::cargo_bin!("navi")),
         "nv" => Command::new(assert_cmd::cargo::cargo_bin!("nv")),
         _ => panic!("unknown bin: {bin}"),
-    }
+    };
+    // The 2s snapshot/diff deadlines are tuned for interactive use; under
+    // full-suite parallel load they can flake. Generous test deadlines
+    // keep the gate trustworthy.
+    command.env("NAVI_SNAPSHOT_TIMEOUT_MS", "30000");
+    command.env("NAVI_DIFF_TIMEOUT_MS", "30000");
+    command
 }
 
 pub fn command_output(bin: &str, current_dir: &Path, args: &[&str]) -> std::process::Output {

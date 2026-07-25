@@ -2,7 +2,7 @@
 name = "jj-navi"
 version = "0.2.3"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.89"
 exclude = ["xtask/"]
 description = "Workspace navigation and management for Jujutsu, built for parallel human and AI agent workflows."
 license = "MIT"

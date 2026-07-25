@@ -202,6 +202,14 @@ impl LanePath {
             || trimmed.starts_with("../")
             || trimmed.contains("/../")
             || trimmed.ends_with("/..")
+            || trimmed.contains("/./")
+            || trimmed.ends_with("/.")
+            // Write-set paths are literal prefixes; glob syntax would be
+            // accepted but silently match nothing, so reject it outright.
+            || trimmed.contains('*')
+            || trimmed.contains('?')
+            || trimmed.contains('[')
+            || trimmed.contains(']')
         {
             return Err(Error::InvalidLanePath(raw));
         }

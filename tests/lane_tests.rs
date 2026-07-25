@@ -378,3 +378,108 @@ fn lane_list_json_reports_weather() {
     assert_eq!(lanes[0]["weather"], "clear");
     assert_eq!(lanes[0]["synced"], true);
 }
+
+#[test]
+fn lane_land_gate_side_effects_do_not_land() {
+    let repo = TempJjRepo::new();
+    // The gate writes an out-of-scope artifact, simulating a build byproduct.
+    repo.write_navi_config(
+        "workspace_template = \"../{repo}.{workspace}\"\n\n[lane]\ngate = \"echo artifact > build-output.bin\"\n",
+    );
+    let alpha = open_lane(&repo, "alpha", "src");
+    write_lane_file(&alpha, "src/lib.rs", "pub fn gated() {}\n");
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "land", "alpha", "-m", "gated work"],
+    );
+    assert_success(&output, "lane land with artifact-writing gate");
+
+    let landed_paths = TempJjRepo::run_at(
+        repo.path(),
+        &[
+            "diff",
+            "--summary",
+            "-r",
+            "default@-",
+            "--ignore-working-copy",
+        ],
+    );
+    assert!(
+        landed_paths.contains("src/lib.rs"),
+        "landed diff should contain the lane's work: {landed_paths}"
+    );
+    assert!(
+        !landed_paths.contains("build-output.bin"),
+        "gate artifacts must not land: {landed_paths}"
+    );
+}
+
+#[test]
+fn lane_sync_drop_unscoped_handles_fileset_metacharacters() {
+    let repo = TempJjRepo::new();
+    let alpha = open_lane(&repo, "alpha", "src");
+    write_lane_file(&alpha, "src/lib.rs", "in scope\n");
+    write_lane_file(&alpha, "docs/a&b.txt", "out of scope\n");
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "sync", "alpha", "--drop-unscoped"],
+    );
+    assert_success(&output, "lane sync --drop-unscoped");
+    assert!(
+        stderr_of(&output).contains("docs/a&b.txt"),
+        "drop should report the metacharacter path"
+    );
+    assert!(
+        !alpha.join("docs/a&b.txt").exists(),
+        "dropped file must actually be restored from trunk (removed)"
+    );
+    assert!(
+        alpha.join("src/lib.rs").exists(),
+        "in-scope work must survive the drop"
+    );
+}
+
+#[test]
+fn lane_land_leaves_peers_fresh_without_divergence() {
+    let repo = TempJjRepo::new();
+    let alpha = open_lane(&repo, "alpha", "src");
+    let beta = open_lane(&repo, "beta", "docs");
+    write_lane_file(&alpha, "src/lib.rs", "alpha work\n");
+    // Beta has on-disk work that jj has not snapshotted yet.
+    write_lane_file(&beta, "docs/notes.md", "beta work\n");
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "land", "alpha", "-m", "land alpha"],
+    );
+    assert_success(&output, "lane land alpha");
+
+    // The peer must be immediately usable: not stale, work intact, and no
+    // divergent change minted by the fan-out rebase.
+    let status = TempJjRepo::run_at(&beta, &["status"]);
+    assert!(
+        status.contains("docs/notes.md"),
+        "peer's on-disk work must survive the landing: {status}"
+    );
+    let divergent = TempJjRepo::run_at(
+        repo.path(),
+        &[
+            "log",
+            "-r",
+            "divergent()",
+            "--no-graph",
+            "-T",
+            "change_id",
+            "--ignore-working-copy",
+        ],
+    );
+    assert!(
+        divergent.trim().is_empty(),
+        "fan-out must not mint divergent changes: {divergent}"
+    );
+}

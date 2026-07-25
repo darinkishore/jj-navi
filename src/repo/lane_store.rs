@@ -32,12 +32,17 @@ pub(crate) struct LaneRecord {
 pub(crate) struct LaneStore {
     path: PathBuf,
     records: Vec<LaneRecord>,
+    /// Raw records that failed validation, preserved verbatim on save so a
+    /// single bad entry degrades to a warning instead of bricking every
+    /// lane command.
+    quarantined: Vec<toml::Value>,
+    warnings: Vec<String>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
 struct LaneFile {
     #[serde(default, rename = "lane")]
-    lanes: Vec<LaneRecordFile>,
+    lanes: Vec<toml::Value>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -60,7 +65,7 @@ impl LaneStore {
         if !path.is_file() {
             return Ok(Self {
                 path,
-                records: Vec::new(),
+                ..Self::default()
             });
         }
 
@@ -71,13 +76,47 @@ impl LaneStore {
                 message: error.to_string(),
             })?;
 
-        let records = file
-            .lanes
-            .into_iter()
-            .map(|record| parse_record(record, &path))
-            .collect::<Result<Vec<_>>>()?;
+        let mut records = Vec::new();
+        let mut quarantined = Vec::new();
+        let mut warnings = Vec::new();
+        for value in file.lanes {
+            let parsed = value
+                .clone()
+                .try_into::<LaneRecordFile>()
+                .map_err(|error| error.to_string())
+                .and_then(|record| {
+                    parse_record(record, &path).map_err(|error| match error {
+                        Error::InvalidLaneRegistry { message, .. } => message,
+                        other => other.to_string(),
+                    })
+                });
+            match parsed {
+                Ok(record) => records.push(record),
+                Err(message) => {
+                    let name = value
+                        .get("name")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("<unnamed>");
+                    warnings.push(format!(
+                        "skipped invalid lane record '{name}' in {}: {message}",
+                        path.display()
+                    ));
+                    quarantined.push(value);
+                }
+            }
+        }
 
-        Ok(Self { path, records })
+        Ok(Self {
+            path,
+            records,
+            quarantined,
+            warnings,
+        })
+    }
+
+    /// Warnings produced while loading (for example quarantined records).
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     pub(crate) fn get(&self, name: &WorkspaceName) -> Option<&LaneRecord> {
@@ -108,6 +147,11 @@ impl LaneStore {
         self.records
             .sort_by(|left, right| left.name.cmp(&right.name));
         Ok(())
+    }
+
+    /// Remove a record entirely (used to roll back a failed `lane open`).
+    pub(crate) fn remove(&mut self, name: &WorkspaceName) {
+        self.records.retain(|record| record.name != *name);
     }
 
     pub(crate) fn set_lifecycle(
@@ -162,26 +206,26 @@ impl LaneStore {
     }
 
     pub(crate) fn save(&self) -> Result<()> {
-        let parent = self.path.parent().ok_or_else(|| Error::InvalidLaneRegistry {
+        let registry_error = |message: String| Error::InvalidLaneRegistry {
             path: self.path.clone(),
-            message: String::from("lane registry path has no parent"),
-        })?;
-        fs::create_dir_all(parent)?;
-
-        let file = LaneFile {
-            lanes: self
-                .records
-                .iter()
-                .map(|record| serialize_record(record, &self.path))
-                .collect::<Result<Vec<_>>>()?,
+            message,
         };
 
-        let contents =
-            toml::to_string_pretty(&file).map_err(|error| Error::InvalidLaneRegistry {
-                path: self.path.clone(),
-                message: error.to_string(),
-            })?;
-        fs::write(&self.path, contents)?;
+        let mut lanes = Vec::with_capacity(self.records.len() + self.quarantined.len());
+        for record in &self.records {
+            let record = serialize_record(record, &self.path)?;
+            lanes.push(
+                toml::Value::try_from(record)
+                    .map_err(|error| registry_error(error.to_string()))?,
+            );
+        }
+        // Quarantined records ride along untouched; navi never deletes what
+        // it could not parse.
+        lanes.extend(self.quarantined.iter().cloned());
+
+        let contents = toml::to_string_pretty(&LaneFile { lanes })
+            .map_err(|error| registry_error(error.to_string()))?;
+        super::storage::save_atomic(&self.path, &contents)?;
         Ok(())
     }
 }

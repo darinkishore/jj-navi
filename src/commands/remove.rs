@@ -18,8 +18,14 @@ pub fn run_remove(path: &Path, workspace: &str, yes: bool) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let target_root = repo.resolve_removable_workspace_path(&workspace)?;
 
+    // Snapshot (best-effort, bounded) so the archive reflects on-disk work,
+    // then archive any working-copy diff before it is destroyed. `remove`
+    // deletes the same way `lane abandon` does, so it preserves the same way.
+    let _ = crate::repo::snapshot_working_copy_at(&target_root);
+    let archive = repo.archive_workspace_diff(&workspace)?;
+
     if !yes {
-        confirm_remove(&workspace, &target_root)?;
+        confirm_remove(&workspace, &target_root, archive.as_deref())?;
     }
 
     let removed = repo.forget_workspace(&workspace)?;
@@ -33,15 +39,26 @@ pub fn run_remove(path: &Path, workspace: &str, yes: bool) -> Result<()> {
 
     println!("forgot workspace '{removed}'");
     println!("deleted workspace directory '{}'", target_root.display());
+    if let Some(archive) = archive {
+        println!("archived working-copy diff to '{}'", archive.display());
+    }
     Ok(())
 }
 
-fn confirm_remove(workspace: &WorkspaceName, target_root: &Path) -> Result<()> {
+fn confirm_remove(
+    workspace: &WorkspaceName,
+    target_root: &Path,
+    archive: Option<&Path>,
+) -> Result<()> {
     println!(
         "This will permanently remove workspace '{}'.",
         workspace.as_str()
     );
     println!("Directory to delete: {}", target_root.display());
+    match archive {
+        Some(archive) => println!("Unlanded changes archived to: {}", archive.display()),
+        None => println!("The workspace has no working-copy changes."),
+    }
     print!("Type 'yes' to continue: ");
     io::stdout().flush()?;
 

@@ -107,12 +107,33 @@ pub(crate) fn planned_workspace_root(
         return workspace_root.to_path_buf();
     }
 
-    let path = template.render(repo_name, workspace);
+    let path = expand_home(template.render(repo_name, workspace));
     if path.is_absolute() {
         path
     } else {
         workspace_root.join(path)
     }
+}
+
+/// Expand a leading `~`/`~/` in a rendered template path.
+///
+/// Without this, `workspace_template = "~/work/{workspace}"` validates but
+/// creates a literal `~` directory inside the repo.
+fn expand_home(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if text == "~"
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home);
+    }
+    if let Some(rest) = text.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    path
 }
 
 pub(crate) fn display_path_for_list(workspace_root: &Path, target_root: &Path) -> PathBuf {

@@ -444,6 +444,46 @@ pub enum Error {
         lane: String,
     },
 
+    /// Another navi process held the repo mutation lock past the timeout.
+    #[error(
+        "error: another navi operation is holding the repo lock at {path}\nhint: waited {waited_ms}ms; retry, or raise NAVI_LOCK_TIMEOUT_MS"
+    )]
+    MutationLockTimeout {
+        /// Lock file path.
+        path: String,
+        /// How long this process waited before giving up.
+        waited_ms: u128,
+    },
+
+    /// The trunk head moved while a landing was in flight (for example while
+    /// the gate was running).
+    #[error(
+        "error: trunk head moved while landing lane '{lane}' (was {expected}, now {found})\nhint: run navi lane sync {lane}, then land again"
+    )]
+    LaneTrunkMoved {
+        /// Lane name.
+        lane: String,
+        /// Trunk head the landing validated against.
+        expected: String,
+        /// Trunk head observed after the gate.
+        found: String,
+    },
+
+    /// `lane land --close` cannot delete the workspace the command runs in.
+    #[error(
+        "error: cannot close lane '{0}' from inside its own workspace\nhint: run from the trunk workspace, or omit --close"
+    )]
+    LaneCloseFromInside(String),
+
+    /// `switch --revision` conflicts with an existing workspace.
+    #[error(
+        "error: workspace '{workspace}' already exists; --revision only applies when creating\nhint: drop -r to switch, or pick a new workspace name"
+    )]
+    WorkspaceExistsWithRevision {
+        /// Existing workspace name.
+        workspace: String,
+    },
+
     /// An underlying I/O operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

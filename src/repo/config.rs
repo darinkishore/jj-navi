@@ -89,7 +89,7 @@ pub(crate) fn ensure_repo_config(repo_storage_path: &Path, config: &RepoConfig) 
             path: path.clone(),
             message: error.to_string(),
         })?;
-        fs::write(&path, contents)?;
+        super::storage::save_atomic(&path, &contents)?;
     }
 
     Ok(path)

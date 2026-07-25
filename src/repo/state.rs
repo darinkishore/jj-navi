@@ -66,12 +66,6 @@ impl RepoStateStore {
     }
 
     pub(crate) fn save(&self) -> Result<()> {
-        let parent = self.path.parent().ok_or_else(|| Error::InvalidRepoState {
-            path: self.path.clone(),
-            message: String::from("state path has no parent"),
-        })?;
-        fs::create_dir_all(parent)?;
-
         let file = RepoStateFile {
             switch: SwitchStateFile {
                 previous_workspace: self
@@ -84,7 +78,7 @@ impl RepoStateStore {
             path: self.path.clone(),
             message: error.to_string(),
         })?;
-        fs::write(&self.path, contents)?;
+        super::storage::save_atomic(&self.path, &contents)?;
         Ok(())
     }
 }

@@ -21,6 +21,13 @@ fn workspace_by_name<'a>(json: &'a Value, name: &str) -> &'a Value {
         .expect("workspace entry")
 }
 
+
+fn expected_cd_directive(path: &std::path::Path) -> String {
+    let canonical = std::fs::canonicalize(path).expect("canonicalize directive target");
+    let escaped = canonical.display().to_string().replace('\'', "'\\''");
+    format!("cd -- '{escaped}'\n")
+}
+
 #[test]
 fn switch_existing_prints_relative_path() {
     let repo = TempJjRepo::new();
@@ -334,10 +341,10 @@ fn switch_writes_cd_directive_when_shell_integration_is_active() {
         .stdout(predicate::str::is_empty());
 
     let contents = std::fs::read_to_string(directive_file).expect("read directive file");
-    assert_eq!(
-        contents,
-        format!("cd -- '../{}.feature-auth'\n", repo.repo_name())
-    );
+    let target = repo
+        .path()
+        .with_file_name(format!("{}.feature-auth", repo.repo_name()));
+    assert_eq!(contents, expected_cd_directive(&target));
 }
 
 #[test]
@@ -361,10 +368,10 @@ fn switch_writes_shell_escaped_directive_for_special_paths() {
         .success();
 
     let contents = std::fs::read_to_string(directive_file).expect("read directive file");
-    assert_eq!(
-        contents,
-        format!("cd -- '../{}.space feature-auth'\\''s'\n", repo.repo_name())
-    );
+    let target = repo
+        .path()
+        .with_file_name(format!("{}.space feature-auth's", repo.repo_name()));
+    assert_eq!(contents, expected_cd_directive(&target));
 }
 
 #[test]
@@ -663,7 +670,7 @@ fn switch_dash_writes_cd_directive_when_shell_integration_is_active() {
         .stdout(predicate::str::is_empty());
 
     let contents = std::fs::read_to_string(directive_file).expect("read directive file");
-    assert_eq!(contents, format!("cd -- '../{}'\n", repo.repo_name()));
+    assert_eq!(contents, expected_cd_directive(repo.path()));
 }
 
 #[test]
@@ -735,7 +742,7 @@ fn switch_at_writes_cd_directive_when_shell_integration_is_active() {
         .stderr(predicate::str::is_empty());
 
     let contents = std::fs::read_to_string(directive_file).expect("read directive file");
-    assert_eq!(contents, "cd -- '..'\n");
+    assert_eq!(contents, expected_cd_directive(repo.path()));
 }
 
 #[test]
@@ -860,7 +867,7 @@ fn switch_caret_writes_cd_directive_when_shell_integration_is_active() {
         .stderr(predicate::str::is_empty());
 
     let contents = std::fs::read_to_string(directive_file).expect("read directive file");
-    assert_eq!(contents, format!("cd -- '../{}'\n", repo.repo_name()));
+    assert_eq!(contents, expected_cd_directive(repo.path()));
 }
 
 #[test]
@@ -883,11 +890,14 @@ fn switch_existing_warns_but_succeeds_when_repo_state_cannot_be_saved() {
     let repo = TempJjRepo::new();
     repo.create_workspace("feature-auth");
     repo.write_navi_state("[switch]\nprevious_workspace = \"stale\"\n");
-    let mut permissions = std::fs::metadata(repo.navi_state_path())
-        .expect("state metadata")
+    // Atomic saves write a temp file and rename, so a read-only state file
+    // alone no longer fails; make the containing directory unwritable.
+    let navi_dir = repo.navi_state_path().parent().expect("navi dir").to_path_buf();
+    let mut permissions = std::fs::metadata(&navi_dir)
+        .expect("navi dir metadata")
         .permissions();
-    permissions.set_mode(0o444);
-    std::fs::set_permissions(repo.navi_state_path(), permissions).expect("set state permissions");
+    permissions.set_mode(0o555);
+    std::fs::set_permissions(&navi_dir, permissions).expect("set navi dir permissions");
 
     command("navi")
         .current_dir(repo.path())
@@ -915,11 +925,14 @@ fn switch_writes_cd_directive_and_warns_when_repo_state_cannot_be_saved() {
     let repo = TempJjRepo::new();
     repo.create_workspace("feature-auth");
     repo.write_navi_state("[switch]\nprevious_workspace = \"stale\"\n");
-    let mut permissions = std::fs::metadata(repo.navi_state_path())
-        .expect("state metadata")
+    // Atomic saves write a temp file and rename, so a read-only state file
+    // alone no longer fails; make the containing directory unwritable.
+    let navi_dir = repo.navi_state_path().parent().expect("navi dir").to_path_buf();
+    let mut permissions = std::fs::metadata(&navi_dir)
+        .expect("navi dir metadata")
         .permissions();
-    permissions.set_mode(0o444);
-    std::fs::set_permissions(repo.navi_state_path(), permissions).expect("set state permissions");
+    permissions.set_mode(0o555);
+    std::fs::set_permissions(&navi_dir, permissions).expect("set navi dir permissions");
     let directive_dir = tempfile::TempDir::new().expect("temp directive dir");
     let directive_file = directive_dir.path().join("navi-directives.sh");
 
@@ -935,8 +948,36 @@ fn switch_writes_cd_directive_and_warns_when_repo_state_cannot_be_saved() {
         ));
 
     let contents = std::fs::read_to_string(directive_file).expect("read directive file");
-    assert_eq!(
-        contents,
-        format!("cd -- '../{}.feature-auth'\n", repo.repo_name())
-    );
+    let target = repo
+        .path()
+        .with_file_name(format!("{}.feature-auth", repo.repo_name()));
+    assert_eq!(contents, expected_cd_directive(&target));
+}
+
+#[test]
+fn switch_create_with_revision_fails_for_existing_workspace() {
+    let repo = TempJjRepo::new();
+    repo.create_workspace("feature-auth");
+
+    command("navi")
+        .current_dir(repo.path())
+        .args(["switch", "-c", "-r", "root()", "feature-auth"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "already exists; --revision only applies when creating",
+        ));
+}
+
+#[test]
+fn switch_create_warns_for_existing_workspace() {
+    let repo = TempJjRepo::new();
+    repo.create_workspace("feature-auth");
+
+    command("navi")
+        .current_dir(repo.path())
+        .args(["switch", "-c", "feature-auth"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("--create ignored"));
 }

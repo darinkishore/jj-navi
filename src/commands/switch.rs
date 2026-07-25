@@ -47,6 +47,19 @@ pub fn run_switch(
     };
 
     let resolved_path = if repo.workspace_exists(&workspace)? {
+        // Never silently ignore creation flags on an existing workspace: -r
+        // would leave the caller believing a fresh workspace exists at that
+        // revision.
+        if revision.is_some() {
+            return Err(Error::WorkspaceExistsWithRevision {
+                workspace: workspace.as_str().to_owned(),
+            });
+        }
+        if create {
+            eprintln!(
+                "warning: workspace '{workspace}' already exists; switching to it (--create ignored)"
+            );
+        }
         repo.resolve_workspace_path(&workspace)?
     } else if create {
         let target_root = repo.create_workspace(&workspace, revision)?;
@@ -124,8 +137,13 @@ fn emit_existing_switch(
 }
 
 fn emit_switch_destination(repo: &NaviWorkspace, target_root: &Path) -> Result<()> {
-    let display_path = repo.display_path_for_switch(target_root);
-    if !write_cd_directive(&display_path)? {
+    // The directive gets the absolute path: relative paths are computed
+    // against navi's canonicalized cwd, which diverges from the shell's
+    // logical cwd under symlinks and would cd to the wrong place.
+    let absolute_target = std::fs::canonicalize(target_root)
+        .unwrap_or_else(|_| target_root.to_path_buf());
+    if !write_cd_directive(&absolute_target)? {
+        let display_path = repo.display_path_for_switch(target_root);
         println!("{}", display_path.display());
     }
     Ok(())

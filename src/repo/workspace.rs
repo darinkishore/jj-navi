@@ -203,6 +203,19 @@ impl NaviWorkspace {
             .any(|entry| entry.name == *workspace))
     }
 
+    /// Snapshot the set of registered workspace names in one `jj` call.
+    ///
+    /// Lane operations loop over many lanes; checking existence against this
+    /// set avoids one `jj workspace list` subprocess per lane.
+    pub(crate) fn workspace_name_set(&self) -> Result<std::collections::BTreeSet<WorkspaceName>> {
+        let jj = JjClient::new(&self.workspace_root);
+        Ok(jj
+            .list_workspaces()?
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect())
+    }
+
     /// Forget a workspace via `jj workspace forget`.
     ///
     /// # Errors
@@ -837,7 +850,7 @@ fn source_revset(source: &WorkspaceName, target: &WorkspaceName) -> String {
 }
 
 fn workspace_symbol(workspace: &WorkspaceName) -> String {
-    format!("{}@", workspace.as_str())
+    super::jj::workspace_revset_symbol(workspace)
 }
 
 fn parse_duplicated_change_id(output: &str, source_root_commit_id: &str) -> Option<String> {

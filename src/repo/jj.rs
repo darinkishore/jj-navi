@@ -12,9 +12,86 @@ use crate::types::{
     WorkspaceDiffSnapshot, WorkspaceDiffStatus, WorkspaceFreshnessSnapshot, WorkspaceName,
 };
 
-const WORKSPACE_CURRENT_TIMEOUT: Duration = Duration::from_secs(2);
-const WORKSPACE_DIFF_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_WORKSPACE_CURRENT_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_WORKSPACE_DIFF_TIMEOUT: Duration = Duration::from_secs(2);
 static TEMP_OUTPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn workspace_current_timeout() -> Duration {
+    timeout_from_env("NAVI_SNAPSHOT_TIMEOUT_MS", DEFAULT_WORKSPACE_CURRENT_TIMEOUT)
+}
+
+fn workspace_diff_timeout() -> Duration {
+    timeout_from_env("NAVI_DIFF_TIMEOUT_MS", DEFAULT_WORKSPACE_DIFF_TIMEOUT)
+}
+
+fn timeout_from_env(var: &str, default: Duration) -> Duration {
+    std::env::var(var)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(default, Duration::from_millis)
+}
+
+/// Render a workspace name as a safely quoted revset symbol (`"name"@`).
+///
+/// Unquoted interpolation lets characters like `|`, `~`, or `::` in a
+/// workspace name change the meaning of the surrounding revset.
+pub(crate) fn workspace_revset_symbol(name: &WorkspaceName) -> String {
+    format!("{}@", quote_revset_string(name.as_str()))
+}
+
+fn quote_revset_string(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Render a repo-relative path as an exact-match `file:` fileset pattern.
+///
+/// `jj` parses positional path arguments as fileset expressions, so raw
+/// paths containing `&`, `~`, `*`, or quotes either error or silently match
+/// the wrong set of files.
+pub(crate) fn fileset_exact_pattern(path: &str) -> String {
+    format!("file:{}", quote_revset_string(path))
+}
+
+/// Undo jj template string quoting on ingested names.
+///
+/// `jj workspace list -T name` renders names that need quoting (for example
+/// `a|b`) wrapped in double quotes with backslash escapes.
+fn unquote_template_string(value: &str) -> String {
+    let inner = value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'));
+    let Some(inner) = inner else {
+        return value.to_owned();
+    };
+
+    let mut unquoted = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => unquoted.push('\n'),
+                Some('r') => unquoted.push('\r'),
+                Some('t') => unquoted.push('\t'),
+                Some('0') => unquoted.push('\0'),
+                Some(other) => unquoted.push(other),
+                None => unquoted.push('\\'),
+            }
+        } else {
+            unquoted.push(ch);
+        }
+    }
+    unquoted
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct JjWorkspaceListEntry {
@@ -45,8 +122,6 @@ pub(crate) struct JjClient<'a> {
 pub(crate) fn config_list(path: &Path, name: &str) -> Option<String> {
     let output = jj_command()
         .args([
-            OsString::from("--color=never"),
-            OsString::from("--no-pager"),
             OsString::from("config"),
             OsString::from("list"),
             OsString::from("--include-defaults"),
@@ -66,12 +141,30 @@ pub(crate) fn config_list(path: &Path, name: &str) -> Option<String> {
 pub(crate) fn snapshot_working_copy_at(path: &Path) -> WorkspaceFreshnessSnapshot {
     let args = [
         OsString::from("--quiet"),
-        OsString::from("--no-pager"),
         OsString::from("util"),
         OsString::from("snapshot"),
     ];
+    let timeout = workspace_current_timeout();
 
-    match run_with_timeout(path, &args, WORKSPACE_CURRENT_TIMEOUT) {
+    let mut result = run_with_timeout(path, &args, timeout);
+    // Umbrella: a stale working copy is weather, not an error. Recover it
+    // once and retry before reporting failure.
+    if let TimedCommandResult::Failure(stderr) = &result
+        && stderr_reports_stale(stderr)
+    {
+        let update = [
+            OsString::from("workspace"),
+            OsString::from("update-stale"),
+        ];
+        if matches!(
+            run_with_timeout(path, &update, timeout),
+            TimedCommandResult::Success(_)
+        ) {
+            result = run_with_timeout(path, &args, timeout);
+        }
+    }
+
+    match result {
         TimedCommandResult::Success(_) => WorkspaceFreshnessSnapshot::current(),
         TimedCommandResult::Failure(stderr) => WorkspaceFreshnessSnapshot::failed(
             meaningful_stderr(&stderr, "jj could not make the workspace current"),
@@ -86,15 +179,13 @@ pub(crate) fn snapshot_working_copy_at(path: &Path) -> WorkspaceFreshnessSnapsho
 pub(crate) fn diff_stat_at(path: &Path) -> WorkspaceDiffSnapshot {
     let args = [
         OsString::from("--ignore-working-copy"),
-        OsString::from("--color=never"),
-        OsString::from("--no-pager"),
         OsString::from("diff"),
         OsString::from("--stat"),
         OsString::from("-r"),
         OsString::from("@"),
     ];
 
-    match run_with_timeout(path, &args, WORKSPACE_DIFF_TIMEOUT) {
+    match run_with_timeout(path, &args, workspace_diff_timeout()) {
         TimedCommandResult::Success(stdout) => parse_diff_stat(&stdout),
         TimedCommandResult::Failure(_)
         | TimedCommandResult::TimedOut
@@ -122,6 +213,10 @@ impl<'a> JjClient<'a> {
     }
 
     pub(crate) fn ensure_supported_version(&self) -> Result<()> {
+        if std::env::var_os("NAVI_NO_VERSION_CHECK").is_some_and(|value| !value.is_empty()) {
+            return Ok(());
+        }
+
         let args = [OsString::from("--version")];
         let output = self.run(&args)?;
         let found = output.trim().to_owned();
@@ -155,7 +250,7 @@ impl<'a> JjClient<'a> {
             .find(|line| !line.is_empty())
             .ok_or(Error::OrphanedWorkspace)?;
 
-        WorkspaceName::new(name.to_owned())
+        WorkspaceName::new(unquote_template_string(name))
     }
 
     pub(crate) fn list_workspaces(&self) -> Result<Vec<JjWorkspaceListEntry>> {
@@ -347,6 +442,16 @@ impl<'a> JjClient<'a> {
         Ok(parse_diff_summary_paths(&output))
     }
 
+    /// Render a git-format diff of a revision against its parents.
+    pub(crate) fn diff_git_rev(&self, revision: &str) -> Result<String> {
+        self.run_ignoring_working_copy(&[
+            OsString::from("diff"),
+            OsString::from("--git"),
+            OsString::from("-r"),
+            OsString::from(revision),
+        ])
+    }
+
     /// Render a git-format diff between two revisions.
     pub(crate) fn diff_git(&self, from: &str, to: &str) -> Result<String> {
         self.run_ignoring_working_copy(&[
@@ -384,6 +489,10 @@ impl<'a> JjClient<'a> {
     }
 
     /// Restore paths in this client's working copy from a revision.
+    ///
+    /// Paths are passed as exact-match `file:` fileset patterns so names
+    /// containing fileset metacharacters (`&`, `~`, `*`, quotes) restore the
+    /// named file instead of silently matching a different set.
     pub(crate) fn restore_paths(&self, from: &str, paths: &[String]) -> Result<()> {
         let mut args = vec![
             OsString::from("restore"),
@@ -391,7 +500,7 @@ impl<'a> JjClient<'a> {
             OsString::from(from),
         ];
         for path in paths {
-            args.push(OsString::from(path));
+            args.push(OsString::from(fileset_exact_pattern(path)));
         }
         self.run(&args).map(|_| ())
     }
@@ -428,6 +537,28 @@ impl<'a> JjClient<'a> {
     }
 
     fn run_capture(&self, args: &[OsString]) -> Result<JjCommandOutput> {
+        let result = self.run_capture_once(args);
+
+        // Umbrella: recover a stale working copy once and retry. Nothing was
+        // mutated by the failed attempt, so the retry is safe. Guard against
+        // recursing on `workspace update-stale` itself.
+        if let Err(Error::JjCommandFailed { stderr, .. }) = &result
+            && stderr_reports_stale(stderr)
+            && !is_update_stale_command(args)
+        {
+            let update = [
+                OsString::from("workspace"),
+                OsString::from("update-stale"),
+            ];
+            if self.run_capture_once(&update).is_ok() {
+                return self.run_capture_once(args);
+            }
+        }
+
+        result
+    }
+
+    fn run_capture_once(&self, args: &[OsString]) -> Result<JjCommandOutput> {
         let output = jj_command()
             .args(args)
             .current_dir(self.workspace_root)
@@ -555,12 +686,27 @@ fn run_with_timeout(path: &Path, args: &[OsString], timeout: Duration) -> TimedC
 }
 
 fn jj_command() -> Command {
-    let mut command = Command::new("jj");
+    let binary = std::env::var_os("NAVI_JJ_BIN")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OsString::from("jj"));
+    let mut command = Command::new(binary);
     command
+        // Pin jj's output format so user config (ui.color, pagers) cannot
+        // rewrite what navi parses.
+        .args(["--color=never", "--no-pager"])
         .env_remove("COMPLETE")
         .env_remove("_CLAP_COMPLETE_INDEX")
         .env_remove("_CLAP_IFS");
     command
+}
+
+fn stderr_reports_stale(stderr: &str) -> bool {
+    let stderr = stderr.to_lowercase();
+    stderr.contains("stale") && stderr.contains("working copy")
+}
+
+fn is_update_stale_command(args: &[OsString]) -> bool {
+    args.iter().any(|arg| arg == "update-stale")
 }
 
 fn temp_output_file(kind: &str) -> std::io::Result<(File, PathBuf)> {
@@ -674,7 +820,7 @@ fn parse_workspace_line(line: &str) -> Result<JjWorkspaceListEntry> {
     };
 
     Ok(JjWorkspaceListEntry {
-        name: WorkspaceName::new(name.to_owned())?,
+        name: WorkspaceName::new(unquote_template_string(name))?,
         is_current,
         commit_id: commit_id.to_owned(),
         change_id: change_id.to_owned(),

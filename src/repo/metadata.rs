@@ -48,6 +48,8 @@ struct WorkspaceMetadataRecordFile {
     created_by_navi: bool,
     created_at: String,
     template: String,
+    /// Tolerate files written before this field existed.
+    #[serde(default)]
     revision: String,
 }
 
@@ -145,15 +147,6 @@ impl WorkspaceMetadataStore {
     }
 
     pub(crate) fn save(&self) -> Result<()> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| Error::InvalidWorkspaceMetadata {
-                path: self.path.clone(),
-                message: String::from("metadata path has no parent"),
-            })?;
-        fs::create_dir_all(parent)?;
-
         let file = WorkspaceMetadataFile {
             workspaces: self
                 .records
@@ -182,7 +175,7 @@ impl WorkspaceMetadataStore {
                 path: self.path.clone(),
                 message: error.to_string(),
             })?;
-        fs::write(&self.path, contents)?;
+        super::storage::save_atomic(&self.path, &contents)?;
         Ok(())
     }
 }

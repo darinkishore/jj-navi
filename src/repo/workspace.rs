@@ -203,6 +203,31 @@ impl NaviWorkspace {
             .any(|entry| entry.name == *workspace))
     }
 
+    /// Roots of every workspace whose directory exists and validates,
+    /// including the current one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the workspace list cannot be read.
+    pub(crate) fn live_workspace_roots(&self) -> Result<Vec<PathBuf>> {
+        let mut roots = vec![self.workspace_root.clone()];
+        for name in self.workspace_name_set()? {
+            if name == self.current_workspace {
+                continue;
+            }
+            let resolved = self.resolve_workspace_path(&name)?;
+            if resolved.is_switchable() {
+                roots.push(resolved.path);
+            }
+        }
+        Ok(roots)
+    }
+
+    /// Best-effort recovery of a stale working copy at `root`.
+    pub(crate) fn recover_stale_at(root: &Path) {
+        let _ = JjClient::new(root).workspace_update_stale();
+    }
+
     /// A jj client rooted at this workspace.
     #[must_use]
     pub(crate) fn main_jj_client(&self) -> JjClient<'_> {

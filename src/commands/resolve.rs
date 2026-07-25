@@ -59,6 +59,21 @@ pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool) -> Result<
     const MAX_PASSES: usize = 10;
 
     let repo = NaviWorkspace::open(path)?;
+
+    // Resolutions rebase descendants, which can include live workspaces'
+    // working-copy commits. Snapshot them first so nothing un-snapshotted
+    // can be stranded, and recover them after (same doctrine as lane
+    // fan-out).
+    let live_roots = if apply {
+        let roots = repo.live_workspace_roots()?;
+        for root in &roots {
+            let _ = crate::repo::snapshot_working_copy_at(root);
+        }
+        roots
+    } else {
+        Vec::new()
+    };
+
     let mut pass = 0;
     let mut resolved_total = 0usize;
     let mut skipped: Vec<String> = Vec::new();
@@ -124,6 +139,9 @@ pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool) -> Result<
     }
 
     if apply {
+        for root in &live_roots {
+            NaviWorkspace::recover_stale_at(root);
+        }
         eprintln!();
         eprintln!(
             "union-resolved '{target_file}' at {resolved_total} root(s) across {pass} pass(es)"

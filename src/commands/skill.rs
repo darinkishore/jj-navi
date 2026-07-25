@@ -6,10 +6,14 @@
 
 /// Run `navi skill`: print the guide to stdout.
 pub fn run_skill() {
-    println!("{}", SKILL.trim_end());
+    println!(
+        "# navi v{} — Jujutsu workspace & lane navigator (agent skill)\n{}",
+        env!("CARGO_PKG_VERSION"),
+        SKILL.trim_end()
+    );
 }
 
-const SKILL: &str = r#"# navi — Jujutsu workspace & lane navigator (agent skill)
+const SKILL: &str = r#"
 
 Load this ONCE per session (`navi skill`); do not re-run it, it is static
 per binary version. Everything below is stable interface: error codes and
@@ -100,9 +104,9 @@ navi lane land feat-auth -m "auth: add tokens" --close --json
   shrink the write-set (release refuses to empty it).
 - `lane sync [NAME] [--drop-unscoped]` — all open lanes when NAME omitted;
   `--drop-unscoped` restores out-of-scope files from the target head.
-  When a sync mints conflicts on files covered by `[resolve]` policies,
-  navi auto-applies them (disable with `[lane] auto_resolve = false`) —
-  policied conflicts die at birth instead of propagating.
+  When sync or land hits conflicts on files covered by `[resolve]`
+  policies, navi auto-applies them and continues (disable with
+  `[lane] auto_resolve = false`) — policied conflicts die at birth.
 - `lane land NAME` — refusal-checked (synced? conflict-free? in scope?
   described?), then gate, then atomic advance, then automatic *fan-out*:
   every peer lane is rebased onto the new head (snapshot-first, no

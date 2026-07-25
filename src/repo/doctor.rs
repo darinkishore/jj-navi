@@ -150,7 +150,7 @@ fn engine_findings(workspace_root: &Path) -> Vec<DoctorFinding> {
                     DoctorSeverity::Warning,
                     DoctorFindingCode::DivergentChanges,
                     format!("{} divergent change(s)", changes.len()),
-                    Some(String::from("run: navi heal")),
+                    Some(String::from("run: navi tidy (or navi heal)")),
                 )),
                 Err(error) => findings.push(deep_finding(
                     DoctorSeverity::Warning,

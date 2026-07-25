@@ -208,7 +208,19 @@ pub fn run_lane_land(
 ) -> Result<()> {
     let repo = NaviWorkspace::open(path)?;
     let name = WorkspaceName::new(name.to_owned())?;
-    let outcome = repo.lane_land(&name, request)?;
+    // Same self-healing as sync: when conflicts are the only blocker and
+    // [resolve] policies cover them, apply and retry once.
+    let config = repo.repo_config();
+    let outcome = match repo.lane_land(&name, request) {
+        Err(Error::LaneConflicted { .. })
+            if config.lane.auto_resolve && !config.resolve.is_empty() =>
+        {
+            eprintln!("landing blocked by conflicts; applying [resolve] policies...");
+            crate::commands::resolve::sweep_policies(&repo, true)?;
+            repo.lane_land(&name, request)?
+        }
+        other => other?,
+    };
     repo.divergence_tripwire();
     eprint!("{}", render_lane_land_outcome(&outcome));
     if json {

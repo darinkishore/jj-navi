@@ -214,10 +214,24 @@ fn resolve_union_handles_many_sided_conflicts_with_dedup() {
     assert_eq!(root["files"][0]["sides"], 3);
     assert!(root["change_id"].is_string(), "census carries change ids");
 
+    // Scoped to an unrelated revset's ancestry, the loop finds nothing.
     let output = command_output(
         "navi",
         repo.path(),
-        &["resolve", "--union", "log.md", "--apply", "--json"],
+        &["resolve", "--union", "log.md", "-r", &base, "--apply", "--json"],
+    );
+    assert_success(&output, "scoped resolve (out of scope)");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("scoped envelope");
+    assert!(
+        envelope["result"]["roots"].as_array().expect("roots").is_empty(),
+        "out-of-scope resolve must touch nothing: {envelope}"
+    );
+
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["resolve", "--union", "log.md", "-r", "::@", "--apply", "--json"],
     );
     assert_success(&output, "resolve 3-sided union");
     let envelope: serde_json::Value =
@@ -514,4 +528,51 @@ fn abandon_bulk_removes_dead_subtrees_with_guards() {
         &["--ignore-working-copy", "log", "-r", "all()", "--no-graph", "-T", "description.first_line() ++ \"\\n\""],
     );
     assert!(!remaining.contains("Dead one"), "subtree gone: {remaining}");
+}
+
+/// `lane land` self-heals policied conflicts instead of refusing.
+#[test]
+fn lane_land_auto_applies_resolve_policies() {
+    let repo = TempJjRepo::new();
+    commit_file(repo.path(), "CHANGELOG.md", "# log\n- base\n", "Add changelog");
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "open", "alpha", "--path", "CHANGELOG.md"],
+    );
+    assert_success(&output, "lane open alpha");
+    let lane = repo
+        .path()
+        .with_file_name(format!("{}.alpha", repo.repo_name()));
+    fs::write(lane.join("CHANGELOG.md"), "# log\n- base\n- alpha entry\n")
+        .expect("write lane changelog");
+    TempJjRepo::run_at(&lane, &["describe", "-m", "alpha entry"]);
+    commit_file(
+        repo.path(),
+        "CHANGELOG.md",
+        "# log\n- base\n- trunk entry\n",
+        "Trunk entry",
+    );
+
+    // Sync BEFORE the policy exists: the lane ends up synced but
+    // conflicted (no auto-resolve possible yet).
+    let output = command_output("navi", repo.path(), &["lane", "sync", "alpha"]);
+    assert_success(&output, "lane sync alpha");
+
+    // Now configure the policy and land directly.
+    repo.write_navi_config(
+        "workspace_template = \"../{repo}.{workspace}\"\n\n[resolve]\n\"CHANGELOG.md\" = \"union\"\n",
+    );
+    let output = command_output(
+        "navi",
+        repo.path(),
+        &["lane", "land", "alpha", "-m", "alpha entry", "--json"],
+    );
+    assert_success(&output, "lane land with auto-resolve");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("applying [resolve] policies"),
+        "land should announce the auto-resolve"
+    );
+    let landed = fs::read_to_string(repo.path().join("CHANGELOG.md")).expect("read changelog");
+    assert!(landed.contains("alpha entry") && landed.contains("trunk entry"));
 }

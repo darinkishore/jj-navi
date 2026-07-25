@@ -2,6 +2,53 @@
 
 All notable changes to `jj-navi` live here.
 
+## v0.3.0 - 2026-07-25
+
+The concurrent-work release: lanes grew a full machine interface, a
+bookmark landing mode, and a self-healing layer for the failure modes
+that plague multi-agent jj repos (staleness, divergence, conflict
+storms). Developed and field-tested against a repo with 667 divergent
+changes and 2,195 conflicted commits; see PHASES.md for the doctrine.
+
+### Major
+
+- feat(lane): bookmark landing mode — `[lane] target = "main"` advances a
+  bookmark from a sparse-empty integration workspace; no live working
+  copy is ever fast-forwarded, and a hygiene gate refuses to publish
+  conflicted/divergent/undescribed history (@claude)
+- feat: machine interface — `--json` envelopes on every mutating verb,
+  stable `error[<code>]` error codes, global `-R/--repo` (@claude)
+- feat: embedded jj-lib read-only engine (pinned =0.43.0) powering
+  `heal`, `conflicts`, `resolve`, and `doctor --deep` (@claude)
+- feat: `navi heal` — divergence healer with newest-op-wins, stacked
+  descendant rebase, per-sibling content diffs, and safety guards
+  (one-writer law, empty-shell, mainline) (@claude)
+- feat: `navi resolve` — structural union conflict resolution at conflict
+  roots (any side count, deduped, fixpoint loop, `-r` scoping) with a
+  `[resolve]` policy table; `lane sync` auto-applies policies (@claude)
+
+### Minor
+
+- feat: `navi tidy` — gc + policy sweep + guarded heal as one idempotent
+  verb; `navi abandon -r` — guarded bulk dead-subtree cleanup (@claude)
+- feat: `navi conflicts` census with blast radius, side counts, and
+  `[BLOCKS TARGET]`/`[stranded]` triage (@claude)
+- feat: `navi exec` — locked, staleness-recovering raw jj passthrough;
+  divergence tripwire warns when the divergent count rises (@claude)
+- feat: `navi skill` (built-in agent guide), `navi init`, `config show`,
+  `lane open -r`, `lane land --gate/--allow-unscoped`, `lane release`,
+  `lane list --lifecycle/--no-snapshot`, `lane gc --prune` (@claude)
+- feat(merge): rewritten on `jj duplicate --destination` — multi-root
+  sources, `merge -r <revset>`, `@`/`-`/`^` aliases (@claude)
+
+### Patch
+
+- fix: repo-wide mutation lock, atomic store writes, registry
+  quarantine, landing race re-verification, snapshot-before-rebase
+  fan-out (no more divergence minting), interrupt-safe sequencing (@claude)
+- perf: engine commit lookups via index prefix resolution instead of
+  full-repo sweeps; doctor warns on op-log bloat (@claude)
+
 ## v0.2.3 - 2026-05-04
 
 ### Minor

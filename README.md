@@ -24,6 +24,27 @@ jj workspaces are great for parallel work, but the workflow around it is quite c
 
 With shell integration installed, `navi switch` also changes your current directory.
 
+## Lanes: concurrent work for humans and agent fleets
+
+Beyond workspace basics, `jj-navi` runs a full concurrent-work layer:
+
+- **Lanes** — workspaces with declared write-sets (`lane open NAME -p src/auth`),
+  kept rebased on a shared target (`lane sync`), landed by fast-forward or
+  bookmark advance (`lane land`) with gates, scope checks, and automatic
+  peer ripple. With `[lane] target = "main"`, landings advance a bookmark
+  and never touch a live working copy.
+- **Self-healing** — `navi heal` repairs divergent changes (with content
+  diffs and safety guards), `navi resolve` structurally resolves
+  append-only file conflicts at their roots, `navi conflicts` triages
+  what blocks the target vs. stranded dead branches, and `navi tidy`
+  runs the whole repair pipeline as one command.
+- **Machine interface** — every mutating verb takes `--json` and emits a
+  stable envelope; every error has a stable `error[<code>]` code; `-R`
+  targets any repo. Built for agents driving jj at fleet scale.
+
+Run `navi skill` for the complete usage guide (agents: load it once per
+session), and see `PHASES.md` for the design doctrine.
+
 ```text
 repo/
 ├── repo                 current workspace
@@ -63,7 +84,7 @@ navi remove feature-auth        # asks before deleting the workspace directory
 npm install -g jj-navi
 
 # cargo
-cargo install jj-navi --version 0.2.3
+cargo install jj-navi --version 0.3.0
 ```
 
 Binaries: `navi`, `nv`

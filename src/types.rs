@@ -493,7 +493,8 @@ pub struct LaneConfig {
     pub integration_workspace: WorkspaceName,
     /// Gate command run before every landing (via `sh -c`), if configured.
     pub gate: Option<String>,
-    /// Auto-apply `[resolve]` policies when a lane sync mints conflicts.
+    /// Auto-apply `[resolve]` policies when syncing or landing hits
+    /// policied conflicts.
     pub auto_resolve: bool,
     /// Create lane workspaces sparse, materializing only the write-set and
     /// context paths.

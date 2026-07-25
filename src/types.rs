@@ -180,6 +180,8 @@ pub struct RepoConfig {
     pub workspace_template: WorkspaceTemplate,
     /// Lane workflow configuration.
     pub lane: LaneConfig,
+    /// Automatic conflict-resolution policies (`[resolve]` table).
+    pub resolve: Vec<ResolvePolicy>,
 }
 
 /// Validated repo-relative lane write-set path prefix.
@@ -438,6 +440,41 @@ impl LaneGcPlan {
         self.ghost_workspaces.is_empty()
             && self.orphaned_lanes.is_empty()
             && self.prunable_lanes.is_empty()
+    }
+}
+
+/// A configured automatic conflict-resolution policy for one file path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvePolicy {
+    /// Repo-relative file path the policy applies to.
+    pub path: String,
+    /// Resolution strategy.
+    pub strategy: ResolveStrategy,
+}
+
+/// Automatic conflict-resolution strategies navi knows how to apply.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolveStrategy {
+    /// Keep every side of each conflicted hunk (append-only files).
+    Union,
+}
+
+impl ResolveStrategy {
+    /// Stable string form used in config and JSON output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Union => "union",
+        }
+    }
+
+    /// Parse the stable string form.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "union" => Some(Self::Union),
+            _ => None,
+        }
     }
 }
 

@@ -115,9 +115,9 @@ enum Commands {
         #[arg(
             long,
             value_name = "FILE",
-            help = "Union-merge this repo-relative file at every conflict root"
+            help = "Union-merge this repo-relative file at every conflict root; omit to sweep configured [resolve] policies"
         )]
-        union: String,
+        union: Option<String>,
 
         #[arg(long, help = "Apply the resolutions instead of printing the plan")]
         apply: bool,
@@ -537,9 +537,10 @@ fn dispatch(
             )?;
         }
         Commands::Conflicts { json } => commands::resolve::run_conflicts(path, json)?,
-        Commands::Resolve { union, apply, json } => {
-            commands::resolve::run_resolve_union(path, &union, apply, json)?;
-        }
+        Commands::Resolve { union, apply, json } => match union {
+            Some(union) => commands::resolve::run_resolve_union(path, &union, apply, json)?,
+            None => commands::resolve::run_resolve_policies(path, apply, json)?,
+        },
         Commands::Exec { workspace, args } => {
             return commands::exec::run_exec(path, workspace.as_deref(), &args);
         }

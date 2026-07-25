@@ -41,7 +41,15 @@ struct HealReport {
 struct HealedChangeJson {
     change_id: String,
     keep_commit: String,
-    abandon_commits: Vec<String>,
+    abandon: Vec<AbandonedSiblingJson>,
+}
+
+#[derive(serde::Serialize)]
+struct AbandonedSiblingJson {
+    commit_id: String,
+    /// Paths whose content differs from the kept sibling; empty means the
+    /// trees are identical; null means the diff was unavailable.
+    changed_paths_vs_keep: Option<Vec<String>>,
 }
 
 #[derive(serde::Serialize)]
@@ -52,7 +60,15 @@ struct SkippedChangeJson {
 
 struct PlannedHeal<'a> {
     change: &'a DivergentChange,
-    losers: Vec<&'a DivergentSibling>,
+    losers: Vec<PlannedLoser<'a>>,
+}
+
+struct PlannedLoser<'a> {
+    sibling: &'a DivergentSibling,
+    /// Paths whose tree content differs from the keep sibling, so a
+    /// newest-op-wins pick that would drop content is visible before
+    /// --apply. `None` when the diff could not be computed.
+    changed_vs_keep: Option<Vec<String>>,
 }
 
 struct SkippedHeal<'a> {
@@ -71,6 +87,7 @@ fn select_heals<'a>(
     all: &'a [DivergentChange],
     options: &HealOptions<'_>,
     me: &str,
+    engine: &crate::engine::Engine,
 ) -> SelectedHeals<'a> {
     let mut selected = SelectedHeals {
         planned: Vec::new(),
@@ -126,6 +143,16 @@ fn select_heals<'a>(
             selected.over_limit += 1;
             continue;
         }
+        let winner = &change.siblings[0];
+        let losers = losers
+            .into_iter()
+            .map(|sibling| PlannedLoser {
+                sibling,
+                changed_vs_keep: engine
+                    .changed_paths_between(&sibling.commit_id, &winner.commit_id)
+                    .ok(),
+            })
+            .collect();
         selected.planned.push(PlannedHeal { change, losers });
     }
 
@@ -151,7 +178,7 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
         return Ok(());
     }
 
-    let plan = select_heals(&all, options, engine.operation_username());
+    let plan = select_heals(&all, options, engine.operation_username(), &engine);
     let SelectedHeals {
         planned,
         skipped,
@@ -166,7 +193,11 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
     if options.apply && !planned.is_empty() {
         let loser_ids: Vec<String> = planned
             .iter()
-            .flat_map(|heal| heal.losers.iter().map(|loser| loser.commit_id.clone()))
+            .flat_map(|heal| {
+                heal.losers
+                    .iter()
+                    .map(|loser| loser.sibling.commit_id.clone())
+            })
             .collect();
         repo.with_mutation_lock(|| {
             let jj = repo.main_jj_client();
@@ -176,8 +207,8 @@ pub fn run_heal(path: &Path, options: &HealOptions<'_>) -> Result<()> {
             for heal in &planned {
                 let winner = &heal.change.siblings[0];
                 for loser in &heal.losers {
-                    if loser.has_children {
-                        jj.rebase_children_onto(&loser.commit_id, &winner.commit_id)?;
+                    if loser.sibling.has_children {
+                        jj.rebase_children_onto(&loser.sibling.commit_id, &winner.commit_id)?;
                         rebased_chains += 1;
                     }
                 }
@@ -230,10 +261,13 @@ fn emit_heal_envelope(
             .map(|heal| HealedChangeJson {
                 change_id: heal.change.change_id.clone(),
                 keep_commit: heal.change.siblings[0].commit_id.clone(),
-                abandon_commits: heal
+                abandon: heal
                     .losers
                     .iter()
-                    .map(|loser| loser.commit_id.clone())
+                    .map(|loser| AbandonedSiblingJson {
+                        commit_id: loser.sibling.commit_id.clone(),
+                        changed_paths_vs_keep: loser.changed_vs_keep.clone(),
+                    })
                     .collect(),
             })
             .collect(),
@@ -263,15 +297,15 @@ fn render_plan(
     let verb = if applying { "healing" } else { "would heal" };
     for heal in planned {
         eprintln!("{verb} change {}", heal.change.change_id);
-        for (index, sibling) in heal.change.siblings.iter().enumerate() {
-            let role = if index == 0 {
-                "keep   "
-            } else if sibling.has_children {
+        eprintln!("  keep    {}", describe_sibling(&heal.change.siblings[0]));
+        for loser in &heal.losers {
+            let role = if loser.sibling.has_children {
                 "abandon (rebasing its descendants onto keep)"
             } else {
                 "abandon"
             };
-            eprintln!("  {role} {}", describe_sibling(sibling));
+            eprintln!("  {role} {}", describe_sibling(loser.sibling));
+            eprintln!("          {}", describe_diff(loser.changed_vs_keep.as_deref()));
         }
     }
     for skip in skipped {
@@ -283,6 +317,31 @@ fn render_plan(
     }
     if over_limit > 0 {
         eprintln!("({over_limit} healable change(s) beyond --limit; rerun to continue)");
+    }
+}
+
+/// One-line content comparison against the keep sibling. An identical tree
+/// means abandoning loses nothing; listed paths are where content differs.
+fn describe_diff(changed: Option<&[String]>) -> String {
+    match changed {
+        None => String::from("diff vs keep: unavailable"),
+        Some([]) => String::from("identical tree to keep"),
+        Some(paths) => {
+            const SHOWN: usize = 3;
+            let mut listed: Vec<&str> = paths.iter().take(SHOWN).map(String::as_str).collect();
+            let more = paths.len().saturating_sub(SHOWN);
+            let suffix = if more > 0 {
+                listed.push("...");
+                format!(" (+{more} more)")
+            } else {
+                String::new()
+            };
+            format!(
+                "differs from keep in {} path(s): {}{suffix}",
+                paths.len(),
+                listed.join(", ")
+            )
+        }
     }
 }
 

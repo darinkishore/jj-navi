@@ -66,9 +66,72 @@ pub fn run_conflicts(path: &Path, json: bool) -> Result<()> {
 /// Returns an error if the repo or engine cannot be opened, or if applying
 /// a resolution fails.
 pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool, json: bool) -> Result<()> {
-    const MAX_PASSES: usize = 10;
-
     let repo = NaviWorkspace::open(path)?;
+    let report = resolve_union_file(&repo, target_file, apply)?;
+    if json {
+        println!(
+            "{}",
+            crate::output::render_json_envelope("resolve", &report)?
+        );
+    }
+    Ok(())
+}
+
+/// Run `navi resolve` with no target: sweep every configured `[resolve]`
+/// policy.
+///
+/// # Errors
+///
+/// Returns an error if no policies are configured or a sweep step fails.
+pub fn run_resolve_policies(path: &Path, apply: bool, json: bool) -> Result<()> {
+    let repo = NaviWorkspace::open(path)?;
+    let policies = repo.repo_config().resolve.clone();
+    if policies.is_empty() {
+        return Err(Error::Engine {
+            message: String::from(
+                "no [resolve] policies configured\nhint: add e.g. \"CHANGELOG.md\" = \"union\" to the [resolve] table in navi config, or pass --union <file>",
+            ),
+        });
+    }
+
+    let mut reports = Vec::new();
+    for policy in &policies {
+        eprintln!("policy: '{}' -> {}", policy.path, policy.strategy.as_str());
+        reports.push(resolve_union_file(&repo, &policy.path, apply)?);
+    }
+    if json {
+        #[derive(serde::Serialize)]
+        struct SweepResult {
+            applied: bool,
+            files: Vec<FileResolveReport>,
+        }
+        println!(
+            "{}",
+            crate::output::render_json_envelope("resolve", &SweepResult {
+                applied: apply,
+                files: reports,
+            })?
+        );
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct FileResolveReport {
+    file: String,
+    strategy: &'static str,
+    applied: bool,
+    passes: usize,
+    roots: Vec<ResolvedRootJson>,
+    skipped: Vec<String>,
+}
+
+fn resolve_union_file(
+    repo: &NaviWorkspace,
+    target_file: &str,
+    apply: bool,
+) -> Result<FileResolveReport> {
+    const MAX_PASSES: usize = 10;
 
     // Resolutions rebase descendants, which can include live workspaces'
     // working-copy commits. Snapshot them first so nothing un-snapshotted
@@ -106,10 +169,14 @@ pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool, json: bool
 
         if !apply {
             render_union_plan(target_file, &targets);
-            if json {
-                emit_resolve_envelope(target_file, false, pass, &planned_json(&targets), &skipped)?;
-            }
-            return Ok(());
+            return Ok(FileResolveReport {
+                file: target_file.to_owned(),
+                strategy: "union",
+                applied: false,
+                passes: pass,
+                roots: planned_json(&targets),
+                skipped,
+            });
         }
 
         if pass > MAX_PASSES {
@@ -171,10 +238,14 @@ pub fn run_resolve_union(path: &Path, target_file: &str, apply: bool, json: bool
     } else if resolved.is_empty() && skipped.is_empty() {
         eprintln!("no conflict roots carry '{target_file}' — nothing to resolve");
     }
-    if json {
-        emit_resolve_envelope(target_file, apply, pass, &resolved, &skipped)?;
-    }
-    Ok(())
+    Ok(FileResolveReport {
+        file: target_file.to_owned(),
+        strategy: "union",
+        applied: apply,
+        passes: pass,
+        roots: resolved,
+        skipped,
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -196,35 +267,6 @@ fn planned_json(targets: &[&crate::engine::ConflictRoot]) -> Vec<ResolvedRootJso
         .collect()
 }
 
-fn emit_resolve_envelope(
-    target_file: &str,
-    applied: bool,
-    passes: usize,
-    roots: &[ResolvedRootJson],
-    skipped: &[String],
-) -> Result<()> {
-    #[derive(serde::Serialize)]
-    struct ResolveResult<'a> {
-        file: &'a str,
-        strategy: &'a str,
-        applied: bool,
-        passes: usize,
-        roots: &'a [ResolvedRootJson],
-        skipped: &'a [String],
-    }
-    println!(
-        "{}",
-        crate::output::render_json_envelope("resolve", &ResolveResult {
-            file: target_file,
-            strategy: "union",
-            applied,
-            passes,
-            roots,
-            skipped,
-        })?
-    );
-    Ok(())
-}
 
 fn render_union_plan(target_file: &str, targets: &[&crate::engine::ConflictRoot]) {
     eprintln!(

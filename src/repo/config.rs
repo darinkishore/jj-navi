@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::types::{LaneConfig, LanePath, RepoConfig, WorkspaceName, WorkspaceTemplate};
+use crate::types::{
+    LaneConfig, LanePath, RepoConfig, ResolvePolicy, ResolveStrategy, WorkspaceName,
+    WorkspaceTemplate,
+};
 
 const NAVI_DIR: &str = "navi";
 const CONFIG_FILE: &str = "config.toml";
@@ -15,6 +18,8 @@ struct RepoConfigFile {
     workspace_template: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lane: Option<LaneConfigFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolve: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -69,9 +74,27 @@ pub(crate) fn load_repo_config(repo_storage_path: &Path) -> Result<RepoConfig> {
             .map_err(|error| config_error(error.to_string()))?,
     };
 
+    let resolve = file
+        .resolve
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(path, strategy)| {
+            let parsed = ResolveStrategy::parse(&strategy).ok_or_else(|| {
+                config_error(format!(
+                    "unknown resolve strategy '{strategy}' for '{path}' (supported: union)"
+                ))
+            })?;
+            Ok(ResolvePolicy {
+                path,
+                strategy: parsed,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     Ok(RepoConfig {
         workspace_template,
         lane,
+        resolve,
     })
 }
 
@@ -107,7 +130,13 @@ fn render_config_scaffold(config: &RepoConfig) -> String {
          # # paths only). Override per lane with --sparse/--full.\n\
          # sparse = false\n\
          # # Extra read-only paths materialized into sparse lane workspaces.\n\
-         # context_paths = []\n",
+         # context_paths = []\n\
+         \n\
+         # [resolve]\n\
+         # # Automatic conflict-resolution policies: navi resolve --apply (no\n\
+         # # arguments) sweeps every entry. 'union' keeps every side of each\n\
+         # # conflicted hunk -- right for append-only files like changelogs.\n\
+         # \"CHANGELOG.md\" = \"union\"\n",
         template = config.workspace_template.as_str(),
     )
 }

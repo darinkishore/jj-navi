@@ -40,6 +40,12 @@ pub fn run_config_show(path: &Path, json: bool) -> Result<()> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    if !config.resolve.is_empty() {
+        eprintln!("[resolve]");
+        for policy in &config.resolve {
+            eprintln!("{:?} = {:?}", policy.path, policy.strategy.as_str());
+        }
+    }
 
     if json {
         #[derive(serde::Serialize)]
@@ -50,11 +56,17 @@ pub fn run_config_show(path: &Path, json: bool) -> Result<()> {
             context_paths: Vec<&'a str>,
         }
         #[derive(serde::Serialize)]
+        struct ResolvePolicyJson<'a> {
+            path: &'a str,
+            strategy: &'a str,
+        }
+        #[derive(serde::Serialize)]
         struct ConfigResult<'a> {
             path: &'a Path,
             exists: bool,
             workspace_template: &'a str,
             lane: LaneConfigJson<'a>,
+            resolve: Vec<ResolvePolicyJson<'a>>,
         }
         println!(
             "{}",
@@ -75,6 +87,14 @@ pub fn run_config_show(path: &Path, json: bool) -> Result<()> {
                             .map(crate::types::LanePath::as_str)
                             .collect(),
                     },
+                    resolve: config
+                        .resolve
+                        .iter()
+                        .map(|policy| ResolvePolicyJson {
+                            path: &policy.path,
+                            strategy: policy.strategy.as_str(),
+                        })
+                        .collect(),
                 }
             )?
         );

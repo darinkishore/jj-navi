@@ -415,6 +415,65 @@ impl Engine {
         Ok(roots)
     }
 
+    /// Resolve a (possibly short) hex commit id against the repo snapshot.
+    fn resolve_commit_prefix(&self, commit_id: &str) -> Result<CommitId> {
+        let repo = self.repo.as_ref();
+        // Heads first (cheap), then a revset sweep over all visible commits.
+        if let Some(id) = self
+            .repo
+            .view()
+            .heads()
+            .iter()
+            .find(|id| id.hex().starts_with(commit_id))
+            .cloned()
+        {
+            return Ok(id);
+        }
+        let expr = RevsetExpression::all();
+        let revset = expr
+            .evaluate(repo)
+            .map_err(|error| engine_error("evaluate all()", error))?;
+        let ids: Vec<CommitId> = pollster::block_on(revset.stream().try_collect())
+            .map_err(|error| engine_error("resolve commit id", error))?;
+        drop(revset);
+        ids.into_iter()
+            .find(|id| id.hex().starts_with(commit_id))
+            .ok_or_else(|| Error::Engine {
+                message: format!("commit {commit_id} not found"),
+            })
+    }
+
+    /// Paths whose tree value differs between two commits (short hex ids).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either commit cannot be resolved or the diff
+    /// stream fails.
+    pub fn changed_paths_between(&self, from: &str, to: &str) -> Result<Vec<String>> {
+        use futures::StreamExt as _;
+        use jj_lib::matchers::EverythingMatcher;
+
+        let from = self
+            .repo
+            .store()
+            .get_commit(&self.resolve_commit_prefix(from)?)
+            .map_err(|error| engine_error("load diff base", error))?;
+        let to = self
+            .repo
+            .store()
+            .get_commit(&self.resolve_commit_prefix(to)?)
+            .map_err(|error| engine_error("load diff target", error))?;
+
+        let from_tree = from.tree();
+        let to_tree = to.tree();
+        let stream = from_tree.diff_stream(&to_tree, &EverythingMatcher);
+        let entries: Vec<_> = pollster::block_on(stream.collect::<Vec<_>>());
+        Ok(entries
+            .into_iter()
+            .map(|entry| entry.path.as_internal_file_string().to_owned())
+            .collect())
+    }
+
     /// Union-merge a conflicted file at `commit_id` (short hex): jj's hunk
     /// merge with conflicted hunks resolved by concatenating every side.
     ///
@@ -427,35 +486,7 @@ impl Engine {
     pub fn union_merge_file(&self, commit_id: &str, path: &str) -> Result<Option<Vec<u8>>> {
         use jj_lib::repo_path::RepoPath;
 
-        let repo = self.repo.as_ref();
-        // Resolve the (possibly short) hex id via the store's index.
-        let full = self
-            .repo
-            .view()
-            .heads()
-            .iter()
-            .find(|id| id.hex().starts_with(commit_id))
-            .cloned();
-        let id = if let Some(id) = full {
-            id
-        } else {
-            // Fall back to a revset lookup over all visible commits.
-            let expr = RevsetExpression::all();
-            let revset = expr
-                .evaluate(repo)
-                .map_err(|error| engine_error("evaluate all()", error))?;
-            let ids: Vec<CommitId> = pollster::block_on(revset.stream().try_collect())
-                .map_err(|error| engine_error("resolve commit id", error))?;
-            drop(revset);
-            match ids.into_iter().find(|id| id.hex().starts_with(commit_id)) {
-                Some(id) => id,
-                None => {
-                    return Err(Error::Engine {
-                        message: format!("commit {commit_id} not found"),
-                    });
-                }
-            }
-        };
+        let id = self.resolve_commit_prefix(commit_id)?;
 
         let commit = self
             .repo

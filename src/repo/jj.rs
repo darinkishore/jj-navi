@@ -39,7 +39,7 @@ pub(crate) fn workspace_revset_symbol(name: &WorkspaceName) -> String {
     format!("{}@", quote_revset_string(name.as_str()))
 }
 
-fn quote_revset_string(value: &str) -> String {
+pub(crate) fn quote_revset_string(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
     for ch in value.chars() {
@@ -577,6 +577,19 @@ impl<'a> JjClient<'a> {
             args.push(OsString::from(fileset_exact_pattern(path)));
         }
         self.run(&args).map(|_| ())
+    }
+
+    /// Move a bookmark to a revision. Landing advances are always forward
+    /// (the lane is synced onto the target head), so no --allow-backwards.
+    pub(crate) fn bookmark_move(&self, bookmark: &str, to: &str) -> Result<()> {
+        self.run(&[
+            OsString::from("bookmark"),
+            OsString::from("move"),
+            OsString::from(bookmark),
+            OsString::from("--to"),
+            OsString::from(to),
+        ])
+        .map(|_| ())
     }
 
     /// Configure sparse patterns for this client's workspace (additive).

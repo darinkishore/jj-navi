@@ -27,6 +27,10 @@ struct LaneConfigFile {
     #[serde(default)]
     trunk: Option<String>,
     #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    integration_workspace: Option<String>,
+    #[serde(default)]
     gate: Option<String>,
     #[serde(default)]
     sparse: Option<bool>,
@@ -64,6 +68,13 @@ pub(crate) fn load_repo_config(repo_storage_path: &Path) -> Result<RepoConfig> {
             .transpose()
             .map_err(|error| config_error(error.to_string()))?
             .unwrap_or(lane_defaults.trunk),
+        target: lane_file.target.filter(|target| !target.trim().is_empty()),
+        integration_workspace: lane_file
+            .integration_workspace
+            .map(WorkspaceName::new)
+            .transpose()
+            .map_err(|error| config_error(error.to_string()))?
+            .unwrap_or(lane_defaults.integration_workspace),
         gate: lane_file.gate.filter(|gate| !gate.trim().is_empty()),
         sparse: lane_file.sparse.unwrap_or(lane_defaults.sparse),
         context_paths: lane_file
@@ -121,8 +132,14 @@ fn render_config_scaffold(config: &RepoConfig) -> String {
          \n\
          # [lane]\n\
          # # Workspace whose working-copy parent is the trunk head that lanes\n\
-         # # sync onto and land into.\n\
+         # # sync onto and land into (legacy mode; ignored when target is set).\n\
          # trunk = \"default\"\n\
+         # # Bookmark lanes land into. When set, landings advance this bookmark\n\
+         # # via the integration workspace and no live working copy is ever\n\
+         # # fast-forwarded. The bookmark must exist (jj bookmark create).\n\
+         # target = \"main\"\n\
+         # # Sparse-empty workspace the bookmark advance runs in (auto-created).\n\
+         # integration_workspace = \"navi-integration\"\n\
          # # Gate command run (via sh -c, in the lane workspace) before every\n\
          # # landing; landing aborts if it fails.\n\
          # gate = \"cargo test\"\n\

@@ -72,6 +72,8 @@ pub enum DoctorFindingCode {
     OpChurn,
     /// A landed change was amended after landing.
     MergedThenAmended,
+    /// Push-blockers in the configured landing target's ancestry.
+    TargetHygiene,
 }
 
 /// Diagnostic scope for a doctor finding.

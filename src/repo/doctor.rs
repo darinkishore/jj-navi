@@ -103,9 +103,11 @@ pub(crate) fn build_doctor_report(
         .findings
         .extend(shell::doctor_findings(command_name)?);
     if deep {
-        report
-            .findings
-            .extend(collect_deep_findings(&repo.workspace_root, &repo.repo_storage_path));
+        report.findings.extend(collect_deep_findings(
+            &repo.workspace_root,
+            &repo.repo_storage_path,
+            &repo.config,
+        ));
     }
     report.sort();
     Ok(report)
@@ -187,9 +189,17 @@ fn engine_findings(workspace_root: &Path) -> Vec<DoctorFinding> {
 }
 
 /// Deep hygiene findings from the jj CLI plus the lane registry.
-fn collect_deep_findings(workspace_root: &Path, repo_storage_path: &Path) -> Vec<DoctorFinding> {
+fn collect_deep_findings(
+    workspace_root: &Path,
+    repo_storage_path: &Path,
+    config: &RepoConfig,
+) -> Vec<DoctorFinding> {
     let mut findings = engine_findings(workspace_root);
     let jj = JjClient::new(workspace_root);
+
+    if let Some(bookmark) = &config.lane.target {
+        findings.extend(target_hygiene_findings(&jj, bookmark));
+    }
 
     match jj.count("conflicts()") {
         Ok(0) => findings.push(deep_finding(
@@ -246,6 +256,57 @@ fn collect_deep_findings(workspace_root: &Path, repo_storage_path: &Path) -> Vec
     }
 
     findings.extend(merged_then_amended_findings(&jj, repo_storage_path));
+    findings
+}
+
+/// Push-blockers in the landing target's ancestry: conflicts, divergence,
+/// and undescribed non-empty commits anywhere below the bookmark.
+fn target_hygiene_findings(jj: &JjClient<'_>, bookmark: &str) -> Vec<DoctorFinding> {
+    let symbol = super::jj::quote_revset_string(bookmark);
+    let checks: [(&str, String); 3] = [
+        ("conflicted commit(s)", format!("conflicts() & ::{symbol}")),
+        ("divergent change(s)", format!("divergent() & ::{symbol}")),
+        (
+            "undescribed non-empty commit(s)",
+            format!("::{symbol} & description(exact:\"\") ~ empty() ~ root()"),
+        ),
+    ];
+
+    let mut findings = Vec::new();
+    let mut clean = true;
+    for (what, revset) in checks {
+        match jj.count(&revset) {
+            Ok(0) => {}
+            Ok(count) => {
+                clean = false;
+                findings.push(deep_finding(
+                    DoctorSeverity::Warning,
+                    DoctorFindingCode::TargetHygiene,
+                    format!("{count} {what} in ::{bookmark}"),
+                    Some(String::from(
+                        "these block pushing the target; landing onto it is refused until clean",
+                    )),
+                ));
+            }
+            Err(error) => {
+                clean = false;
+                findings.push(deep_finding(
+                    DoctorSeverity::Warning,
+                    DoctorFindingCode::TargetHygiene,
+                    format!("could not check {what} for ::{bookmark}: {error}"),
+                    None,
+                ));
+            }
+        }
+    }
+    if clean {
+        findings.push(deep_finding(
+            DoctorSeverity::Info,
+            DoctorFindingCode::TargetHygiene,
+            format!("target '{bookmark}' ancestry is clean and pushable"),
+            None,
+        ));
+    }
     findings
 }
 

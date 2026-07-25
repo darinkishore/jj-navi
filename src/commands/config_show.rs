@@ -24,7 +24,16 @@ pub fn run_config_show(path: &Path, json: bool) -> Result<()> {
     );
     eprintln!("workspace_template = {:?}", config.workspace_template.as_str());
     eprintln!("[lane]");
-    eprintln!("trunk = {:?}", config.lane.trunk.as_str());
+    match &config.lane.target {
+        Some(target) => {
+            eprintln!("target = {target:?}");
+            eprintln!(
+                "integration_workspace = {:?}",
+                config.lane.integration_workspace.as_str()
+            );
+        }
+        None => eprintln!("trunk = {:?} (legacy workspace mode; set target for bookmark landings)", config.lane.trunk.as_str()),
+    }
     match &config.lane.gate {
         Some(gate) => eprintln!("gate = {gate:?}"),
         None => eprintln!("# gate = (none configured)"),
@@ -51,6 +60,8 @@ pub fn run_config_show(path: &Path, json: bool) -> Result<()> {
         #[derive(serde::Serialize)]
         struct LaneConfigJson<'a> {
             trunk: &'a str,
+            target: Option<&'a str>,
+            integration_workspace: &'a str,
             gate: Option<&'a str>,
             sparse: bool,
             context_paths: Vec<&'a str>,
@@ -78,6 +89,8 @@ pub fn run_config_show(path: &Path, json: bool) -> Result<()> {
                     workspace_template: config.workspace_template.as_str(),
                     lane: LaneConfigJson {
                         trunk: config.lane.trunk.as_str(),
+                        target: config.lane.target.as_deref(),
+                        integration_workspace: config.lane.integration_workspace.as_str(),
                         gate: config.lane.gate.as_deref(),
                         sparse: config.lane.sparse,
                         context_paths: config

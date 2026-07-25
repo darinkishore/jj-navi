@@ -481,8 +481,16 @@ impl ResolveStrategy {
 /// Lane workflow configuration stored in the repo config file.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LaneConfig {
-    /// Workspace whose working-copy parent is the trunk head.
+    /// Workspace whose working-copy parent is the trunk head. Compat
+    /// fallback used only when `target` is unset.
     pub trunk: WorkspaceName,
+    /// Bookmark lanes land into. When set, landings advance this bookmark
+    /// from the integration workspace instead of fast-forwarding a live
+    /// working copy.
+    pub target: Option<String>,
+    /// Workspace the bookmark advance runs in: auto-created, sparse-empty,
+    /// never a human or agent working copy.
+    pub integration_workspace: WorkspaceName,
     /// Gate command run before every landing (via `sh -c`), if configured.
     pub gate: Option<String>,
     /// Create lane workspaces sparse, materializing only the write-set and
@@ -496,6 +504,8 @@ impl Default for LaneConfig {
     fn default() -> Self {
         Self {
             trunk: WorkspaceName(String::from("default")),
+            target: None,
+            integration_workspace: WorkspaceName(String::from("navi-integration")),
             gate: None,
             sparse: false,
             context_paths: Vec::new(),

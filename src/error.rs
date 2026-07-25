@@ -333,6 +333,23 @@ pub enum Error {
         other_path: String,
     },
 
+    /// The configured landing target bookmark does not exist.
+    #[error(
+        "error: target bookmark '{0}' does not exist\nhint: create it first (jj bookmark create {0} -r <rev>) or unset [lane] target"
+    )]
+    LaneTargetBookmarkMissing(String),
+
+    /// Advancing the target bookmark would publish unclean history.
+    #[error(
+        "error: landing lane '{lane}' would advance the target onto unclean history:\n{problems}\nhint: resolve conflicts, heal divergence, and describe empty commits first; navi doctor --deep shows the full picture"
+    )]
+    LaneTargetHygiene {
+        /// Lane name.
+        lane: String,
+        /// Newline-joined hygiene violations with offending commits.
+        problems: String,
+    },
+
     /// The configured trunk workspace does not exist.
     #[error("error: trunk workspace '{0}' does not exist\nhint: check [lane] trunk in navi config")]
     LaneTrunkMissing(String),
@@ -545,6 +562,8 @@ impl Error {
             Self::LaneNotOpen { .. } => "lane-not-open",
             Self::LaneNameReserved(_) => "lane-name-reserved",
             Self::LaneOverlap { .. } => "lane-overlap",
+            Self::LaneTargetBookmarkMissing(_) => "target-bookmark-missing",
+            Self::LaneTargetHygiene { .. } => "target-hygiene",
             Self::LaneTrunkMissing(_) => "trunk-missing",
             Self::LaneTrunkNotReady { .. } => "trunk-not-ready",
             Self::LaneTrunkDirtyInScope { .. } => "trunk-dirty-in-scope",

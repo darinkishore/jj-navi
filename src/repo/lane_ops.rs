@@ -30,9 +30,25 @@ use super::workspace::NaviWorkspace;
 
 const ARCHIVE_DIR: &str = "archive";
 
+/// Where landings go: either a live trunk workspace's head (legacy) or a
+/// bookmark advanced from the integration workspace.
+enum LandTargetKind {
+    WorkspaceHead(WorkspaceName),
+    Bookmark(String),
+}
+
 struct TrunkContext {
-    name: WorkspaceName,
+    kind: LandTargetKind,
     head_commit: String,
+}
+
+impl TrunkContext {
+    fn label(&self) -> String {
+        match &self.kind {
+            LandTargetKind::WorkspaceHead(name) => format!("workspace '{name}'"),
+            LandTargetKind::Bookmark(bookmark) => format!("bookmark '{bookmark}'"),
+        }
+    }
 }
 
 impl NaviWorkspace {
@@ -52,7 +68,7 @@ impl NaviWorkspace {
         revision: Option<&str>,
     ) -> Result<LaneOpenOutcome> {
         let config = self.repo_config();
-        if *name == config.lane.trunk {
+        if *name == config.lane.trunk || *name == config.lane.integration_workspace {
             return Err(Error::LaneNameReserved(name.as_str().to_owned()));
         }
         if paths.is_empty() {
@@ -380,20 +396,27 @@ impl NaviWorkspace {
         lane_jj.snapshot_recovering_stale()?;
 
         let trunk = self.resolve_trunk()?;
-        let trunk_root = self.trunk_root(&trunk)?;
-        let trunk_jj = JjClient::new(&trunk_root);
+        // A trunk working copy only exists in legacy workspace mode; a
+        // bookmark target involves no live working copy at all.
+        let trunk_root = match &trunk.kind {
+            LandTargetKind::WorkspaceHead(name) => Some(self.trunk_workspace_root(name)?),
+            LandTargetKind::Bookmark(_) => None,
+        };
+        let trunk_jj = trunk_root.as_deref().map(JjClient::new);
         let jj = JjClient::new(self.workspace_root());
         let lane_sym = lane_symbol(name);
 
         verify_landing_preconditions(
             &jj,
             &lane_jj,
-            &trunk_jj,
+            trunk_jj.as_ref(),
             &trunk,
             &record,
             &lane_sym,
             request.allow_unscoped,
         )?;
+
+        pre_finalize_hygiene(&jj, &lane_jj, &trunk, name, &lane_sym)?;
 
         // Pin the landing head BEFORE the gate runs. `finalize_landing_head`
         // snapshots and parks the work; from here on the landed tree is
@@ -443,9 +466,24 @@ impl NaviWorkspace {
             });
         }
 
-        // Fast-forward: move trunk's working copy onto the landed head.
-        // Run inside the trunk workspace so its working copy stays current.
-        trunk_jj.rebase_source("@", &head_commit)?;
+        match &trunk.kind {
+            LandTargetKind::WorkspaceHead(_) => {
+                // Fast-forward: move trunk's working copy onto the landed
+                // head. Run inside the trunk workspace so its working copy
+                // stays current.
+                if let Some(trunk_jj) = &trunk_jj {
+                    trunk_jj.rebase_source("@", &head_commit)?;
+                }
+            }
+            LandTargetKind::Bookmark(bookmark) => {
+                // Law-6 hygiene gate: the bookmark's new history must be
+                // pushable — no conflicts or divergence anywhere below the
+                // head, no undescribed work in the landed range.
+                verify_landing_hygiene(&jj, name, &trunk.head_commit, &head_commit, None)?;
+                let integration_root = self.ensure_integration_workspace(&trunk.head_commit)?;
+                JjClient::new(&integration_root).bookmark_move(bookmark, &head_commit)?;
+            }
+        }
 
         // Reload the registry under the lock: it may have changed while the
         // gate was running.
@@ -715,7 +753,7 @@ impl NaviWorkspace {
             let parents = lane_jj.revisions("parents(@)")?;
             let [parent] = parents.as_slice() else {
                 return Err(Error::LaneTrunkNotReady {
-                    trunk: trunk.name.as_str().to_owned(),
+                    trunk: trunk.label(),
                     reason: String::from("lane working copy has multiple parents"),
                 });
             };
@@ -849,7 +887,33 @@ impl NaviWorkspace {
         Ok(())
     }
 
+    /// Resolve where landings go. With `[lane] target` set, the target is a
+    /// bookmark: its commit is the head, and no working copy is involved.
+    /// Otherwise the legacy trunk workspace's working-copy parent is used.
     fn resolve_trunk(&self) -> Result<TrunkContext> {
+        if let Some(bookmark) = self.repo_config().lane.target.clone() {
+            let jj = JjClient::new(self.workspace_root());
+            // present() turns a missing bookmark into an empty result
+            // instead of a revset error.
+            let revisions = jj.revisions(&format!(
+                "present({})",
+                super::jj::quote_revset_string(&bookmark)
+            ))?;
+            return match revisions.as_slice() {
+                [head] => Ok(TrunkContext {
+                    head_commit: head.commit_id.clone(),
+                    kind: LandTargetKind::Bookmark(bookmark),
+                }),
+                [] => Err(Error::LaneTargetBookmarkMissing(bookmark)),
+                _ => Err(Error::LaneTrunkNotReady {
+                    trunk: format!("bookmark '{bookmark}'"),
+                    reason: String::from(
+                        "bookmark resolves to multiple commits (conflicted bookmark)",
+                    ),
+                }),
+            };
+        }
+
         let name = self.repo_config().lane.trunk.clone();
         if !self.workspace_exists(&name)? {
             return Err(Error::LaneTrunkMissing(name.as_str().to_owned()));
@@ -869,20 +933,46 @@ impl NaviWorkspace {
             });
         };
         Ok(TrunkContext {
-            name,
             head_commit: head.commit_id.clone(),
+            kind: LandTargetKind::WorkspaceHead(name),
         })
     }
 
-    fn trunk_root(&self, trunk: &TrunkContext) -> Result<PathBuf> {
-        if *self.current_workspace_name() == trunk.name {
+    fn trunk_workspace_root(&self, name: &WorkspaceName) -> Result<PathBuf> {
+        if *self.current_workspace_name() == *name {
             return Ok(self.workspace_root().to_path_buf());
         }
-        let resolved = self.resolve_workspace_path(&trunk.name)?;
+        let resolved = self.resolve_workspace_path(name)?;
         if !resolved.path.is_dir() {
-            return Err(Error::LaneTrunkMissing(trunk.name.as_str().to_owned()));
+            return Err(Error::LaneTrunkMissing(name.as_str().to_owned()));
         }
         Ok(resolved.path)
+    }
+
+    /// The sparse-empty workspace bookmark advances run in. Auto-created on
+    /// first use; never a human or agent working copy, so running jj there
+    /// snapshots nothing anyone cares about.
+    fn ensure_integration_workspace(&self, base_commit: &str) -> Result<PathBuf> {
+        let name = self.repo_config().lane.integration_workspace.clone();
+        if self.workspace_exists(&name)? {
+            let resolved = self.resolve_workspace_path(&name)?;
+            if resolved.path.is_dir() {
+                return Ok(resolved.path);
+            }
+            return Err(Error::LaneWorkspaceMissing(name.as_str().to_owned()));
+        }
+        let root = self.planned_workspace_root(&name);
+        let jj = JjClient::new(self.workspace_root());
+        jj.workspace_add_sparse(&name, &root, Some(base_commit), "empty")?;
+        let mut metadata = WorkspaceMetadataStore::load(self.repo_storage_path())?;
+        metadata.record_workspace(
+            &name,
+            &root,
+            &self.repo_config().workspace_template,
+            Some(base_commit),
+        );
+        metadata.save()?;
+        Ok(root)
     }
 
     fn existing_lane_root(&self, name: &WorkspaceName) -> Result<PathBuf> {
@@ -999,7 +1089,7 @@ fn require_open_lane<'a>(store: &'a LaneStore, name: &WorkspaceName) -> Result<&
 fn verify_landing_preconditions(
     jj: &JjClient,
     lane_jj: &JjClient,
-    trunk_jj: &JjClient,
+    trunk_jj: Option<&JjClient>,
     trunk: &TrunkContext,
     record: &LaneRecord,
     lane_sym: &str,
@@ -1046,21 +1136,114 @@ fn verify_landing_preconditions(
     }
 
     // Trunk dirt outside the write-set rides along untouched; dirt inside
-    // it would silently merge with the landing, so refuse.
-    trunk_jj.snapshot_recovering_stale()?;
-    let trunk_dirty = jj.changed_paths_in(&super::jj::workspace_revset_symbol(&trunk.name))?;
-    let dirty_in_scope: Vec<String> = trunk_dirty
-        .into_iter()
-        .filter(|path| record.paths.iter().any(|lane_path| lane_path.contains(path)))
-        .collect();
-    if !dirty_in_scope.is_empty() {
-        return Err(Error::LaneTrunkDirtyInScope {
-            lane: name.as_str().to_owned(),
-            paths: dirty_in_scope.join("\n"),
-        });
+    // it would silently merge with the landing, so refuse. Only meaningful
+    // in workspace mode: a bookmark target has no working copy.
+    if let (Some(trunk_jj), LandTargetKind::WorkspaceHead(trunk_name)) = (trunk_jj, &trunk.kind) {
+        trunk_jj.snapshot_recovering_stale()?;
+        let trunk_dirty = jj.changed_paths_in(&super::jj::workspace_revset_symbol(trunk_name))?;
+        let dirty_in_scope: Vec<String> = trunk_dirty
+            .into_iter()
+            .filter(|path| record.paths.iter().any(|lane_path| lane_path.contains(path)))
+            .collect();
+        if !dirty_in_scope.is_empty() {
+            return Err(Error::LaneTrunkDirtyInScope {
+                lane: name.as_str().to_owned(),
+                paths: dirty_in_scope.join("\n"),
+            });
+        }
     }
 
     Ok(())
+}
+
+/// In bookmark mode, run the hygiene gate BEFORE finalize mutates anything:
+/// a refused landing must leave no describe/park artifacts. The working-copy
+/// endpoint (and, when it is empty, its parent) is excluded from the
+/// undescribed check because finalize describes it.
+fn pre_finalize_hygiene(
+    jj: &JjClient,
+    lane_jj: &JjClient,
+    trunk: &TrunkContext,
+    name: &WorkspaceName,
+    lane_sym: &str,
+) -> Result<()> {
+    if !matches!(trunk.kind, LandTargetKind::Bookmark(_)) {
+        return Ok(());
+    }
+    let described_by_finalize = if lane_jj.is_empty_commit("@")? {
+        format!("{lane_sym} | parents({lane_sym})")
+    } else {
+        lane_sym.to_owned()
+    };
+    verify_landing_hygiene(
+        jj,
+        name,
+        &trunk.head_commit,
+        lane_sym,
+        Some(&described_by_finalize),
+    )
+}
+
+/// Law-6 hygiene: refuse to advance the target bookmark onto history that
+/// cannot be pushed — conflicts or divergent changes anywhere in `::head`,
+/// or undescribed non-empty commits in the newly landed range.
+fn verify_landing_hygiene(
+    jj: &JjClient,
+    lane: &WorkspaceName,
+    base_commit: &str,
+    head: &str,
+    exclude_undescribed: Option<&str>,
+) -> Result<()> {
+    let mut problems = Vec::new();
+
+    let conflicted = jj.revisions(&format!("conflicts() & ::({head})"))?;
+    if !conflicted.is_empty() {
+        problems.push(format!(
+            "conflicted commit(s) below the head: {}",
+            sample_commits(&conflicted)
+        ));
+    }
+    let divergent = jj.revisions(&format!("divergent() & ::({head})"))?;
+    if !divergent.is_empty() {
+        problems.push(format!(
+            "divergent change(s) below the head: {}",
+            sample_commits(&divergent)
+        ));
+    }
+    let exclusion = exclude_undescribed
+        .map(|revset| format!(" ~ ({revset})"))
+        .unwrap_or_default();
+    let undescribed = jj.revisions(&format!(
+        "({base_commit}..({head})) & description(exact:\"\") ~ empty(){exclusion}"
+    ))?;
+    if !undescribed.is_empty() {
+        problems.push(format!(
+            "undescribed commit(s) in the landed range: {}",
+            sample_commits(&undescribed)
+        ));
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::LaneTargetHygiene {
+            lane: lane.as_str().to_owned(),
+            problems: problems.join("\n"),
+        })
+    }
+}
+
+fn sample_commits(revisions: &[super::jj::JjRevisionSummary]) -> String {
+    const SHOWN: usize = 5;
+    let mut sample: Vec<&str> = revisions
+        .iter()
+        .take(SHOWN)
+        .map(|revision| revision.commit_id.as_str())
+        .collect();
+    if revisions.len() > SHOWN {
+        sample.push("...");
+    }
+    sample.join(", ")
 }
 
 fn check_overlap_excluding(

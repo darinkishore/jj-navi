@@ -162,6 +162,12 @@ navi lane land feat-auth -m "auth: add tokens" --close --json
 
 - `navi switch NAME` (alias `cd`) — aliases: `^` primary, `@` current,
   `-` previous. `-c` creates, `-r <revset>` sets the base (create only).
+  Enclosing contexts follow the switch: interactive shells via shell
+  integration ($NAVI_DIRECTIVE_FILE), host harnesses via $OMP_CD_FILE —
+  when a harness sets it (per tool call), navi writes the raw target
+  path there and the harness re-roots the agent session. Inside such a
+  harness, `navi switch <lane>` is also how YOU move: expect the
+  session-relocation notice after it.
 - `navi list --json [--no-snapshot]` — all workspaces with health/paths.
 - `navi merge -f <ws> [-i <ws>]` or `navi merge -r <revset>` — duplicate
   work into a target workspace (source never rewritten; multi-root OK;

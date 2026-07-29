@@ -348,6 +348,58 @@ fn switch_writes_cd_directive_when_shell_integration_is_active() {
 }
 
 #[test]
+fn switch_writes_raw_path_to_harness_cd_file() {
+    let repo = TempJjRepo::new();
+    repo.create_workspace("feature-auth");
+    let harness_dir = tempfile::TempDir::new().expect("temp harness dir");
+    let harness_file = harness_dir.path().join("omp-cd");
+
+    // Without shell integration the path still prints on stdout: the
+    // harness reads the file, humans and pipelines keep the old contract.
+    command("navi")
+        .current_dir(repo.path())
+        .env("OMP_CD_FILE", &harness_file)
+        .args(["switch", "feature-auth"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty().not());
+
+    let contents = std::fs::read_to_string(&harness_file).expect("read harness cd file");
+    let target = repo
+        .path()
+        .with_file_name(format!("{}.feature-auth", repo.repo_name()));
+    let canonical = std::fs::canonicalize(&target).expect("canonicalize harness target");
+    assert_eq!(contents, format!("{}\n", canonical.display()));
+}
+
+#[test]
+fn switch_feeds_shell_directive_and_harness_sink_together() {
+    let repo = TempJjRepo::new();
+    repo.create_workspace("feature-auth");
+    let sink_dir = tempfile::TempDir::new().expect("temp sink dir");
+    let directive_file = sink_dir.path().join("navi-directives.sh");
+    let harness_file = sink_dir.path().join("omp-cd");
+
+    command("navi")
+        .current_dir(repo.path())
+        .env("NAVI_DIRECTIVE_FILE", &directive_file)
+        .env("OMP_CD_FILE", &harness_file)
+        .args(["switch", "feature-auth"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    let target = repo
+        .path()
+        .with_file_name(format!("{}.feature-auth", repo.repo_name()));
+    let directive = std::fs::read_to_string(&directive_file).expect("read directive file");
+    assert_eq!(directive, expected_cd_directive(&target));
+    let raw = std::fs::read_to_string(&harness_file).expect("read harness cd file");
+    let canonical = std::fs::canonicalize(&target).expect("canonicalize harness target");
+    assert_eq!(raw, format!("{}\n", canonical.display()));
+}
+
+#[test]
 fn switch_writes_shell_escaped_directive_for_special_paths() {
     let repo = TempJjRepo::new();
     repo.write_navi_config("workspace_template = \"../{repo}.space {workspace}'s\"\n");
